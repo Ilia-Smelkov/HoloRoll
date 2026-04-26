@@ -1,0 +1,77 @@
+# --- Build outputs ----------------------------------------------------------
+build/
+out/
+dist/
+.cache/
+CMakeUserPresets.json
+
+# --- IDE / tooling ----------------------------------------------------------
+.vs/
+.vscode/
+*.user
+*.suo
+*.opendb
+*.vcxproj
+*.vcxproj.*
+*.sln
+*.code-workspace
+
+# CLion / Rider
+.idea/
+cmake-build-*/
+
+# --- Cursor / Claude / AI tooling (NEVER commit) ----------------------------
+# Cursor stores per-project rules and can hold MCP credentials in plain text.
+.cursor/
+.cursorrules
+.cursorignore
+.cursor-tutor/
+
+# Claude / Anthropic local state.
+.claude/
+.anthropic/
+
+# Generic AI tool caches.
+.aider*
+.continue/
+
+# --- Secrets ----------------------------------------------------------------
+# Anything that looks like a key or env file. Belt-and-suspenders.
+*.env
+.env
+.env.*
+!.env.example
+secrets.json
+secrets.yaml
+*.pfx
+*.pem
+*.p12
+*.key
+api_keys.txt
+
+# --- Local configuration ----------------------------------------------------
+# Plugin config is per-machine and contains a local filesystem path.
+holoroll_config.ini
+mdd_viewport_config.ini
+
+# --- Archived MVP code ------------------------------------------------------
+# Snapshot of pre-0.1.0 code kept locally for reference. Not part of the
+# public source tree.
+archive/
+
+# --- Test data --------------------------------------------------------------
+# Sample MDD/OBJ assets are too large for the repo and may be private. If
+# you want to commit a tiny example, place it under docs/examples/.
+MDD/
+
+# --- OS junk ----------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+
+# --- Logs / temporary files -------------------------------------------------
+*.log
+*.tmp
+*.bak

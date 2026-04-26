@@ -1,0 +1,40 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "x64-Debug",
+      "displayName": "x64 Debug",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build/x64-Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "architecture": "x64"
+    },
+    {
+      "name": "x64-Release",
+      "displayName": "x64 Release",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build/x64-Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "architecture": "x64"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-debug",
+      "configurePreset": "x64-Debug"
+    },
+    {
+      "name": "build-release",
+      "configurePreset": "x64-Release"
+    }
+  ]
+}

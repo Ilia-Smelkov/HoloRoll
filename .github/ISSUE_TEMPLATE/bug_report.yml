@@ -1,0 +1,55 @@
+name: Bug report
+description: Something isn't working the way it should.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the problem.
+      placeholder: When I clicked X, Y happened, but I expected Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open REAPER with `<project file>` loaded.
+        2. Click `Place regions`.
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: console-output
+    attributes:
+      label: REAPER console output
+      description: |
+        Open `View → Show Console` in REAPER and paste anything HoloRoll logged.
+      render: text
+
+  - type: input
+    id: holoroll-version
+    attributes:
+      label: HoloRoll version
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: reaper-version
+    attributes:
+      label: REAPER version
+      placeholder: 7.10 / 64-bit
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 23H2
+    validations:
+      required: true

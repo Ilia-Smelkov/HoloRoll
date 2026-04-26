@@ -1,0 +1,56 @@
+#include "extension/reaper_bridge.h"
+
+bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
+  if (!rec || !rec->GetFunc) {
+    return false;
+  }
+
+  api.getPlayPosition = reinterpret_cast<GetPlayPositionFn>(rec->GetFunc("GetPlayPosition"));
+  api.getPlayState = reinterpret_cast<GetPlayStateFn>(rec->GetFunc("GetPlayState"));
+  api.getCursorPositionEx = reinterpret_cast<GetCursorPositionExFn>(rec->GetFunc("GetCursorPositionEx"));
+  api.mainOnCommand = reinterpret_cast<MainOnCommandFn>(rec->GetFunc("Main_OnCommand"));
+  api.showConsoleMsg = reinterpret_cast<ShowConsoleMsgFn>(rec->GetFunc("ShowConsoleMsg"));
+  api.addProjectMarker2 = reinterpret_cast<AddProjectMarker2Fn>(rec->GetFunc("AddProjectMarker2"));
+  api.deleteProjectMarker = reinterpret_cast<DeleteProjectMarkerFn>(rec->GetFunc("DeleteProjectMarker"));
+  api.enumProjectMarkers3 = reinterpret_cast<EnumProjectMarkers3Fn>(rec->GetFunc("EnumProjectMarkers3"));
+  api.setExtState = reinterpret_cast<SetExtStateFn>(rec->GetFunc("SetExtState"));
+  api.getExtState = reinterpret_cast<GetExtStateFn>(rec->GetFunc("GetExtState"));
+  api.hasExtState = reinterpret_cast<HasExtStateFn>(rec->GetFunc("HasExtState"));
+  api.dockWindowAddEx = reinterpret_cast<DockWindowAddExFn>(rec->GetFunc("DockWindowAddEx"));
+  api.dockWindowRemove = reinterpret_cast<DockWindowRemoveFn>(rec->GetFunc("DockWindowRemove"));
+  api.dockWindowActivate = reinterpret_cast<DockWindowActivateFn>(rec->GetFunc("DockWindowActivate"));
+
+  return api.getPlayPosition && api.mainOnCommand;
+}
+
+bool ReaperBridge::Initialize(reaper_plugin_info_t* rec) {
+  if (!ResolveReaperApi(rec, api_)) {
+    return false;
+  }
+
+  OnTimerTick();
+  return true;
+}
+
+void ReaperBridge::Shutdown(reaper_plugin_info_t* rec) {
+  (void)rec;
+  timelineTimeSeconds_.store(0.0);
+}
+
+void ReaperBridge::OnTimerTick() {
+  if (!api_.getPlayPosition) {
+    return;
+  }
+
+  double timelineTime = api_.getPlayPosition();
+  const bool hasTransportAndCursor = api_.getPlayState && api_.getCursorPositionEx;
+  if (hasTransportAndCursor) {
+    const int playState = api_.getPlayState();
+    const bool isPlayingOrRecording = (playState & 1) != 0 || (playState & 4) != 0;
+    if (!isPlayingOrRecording) {
+      timelineTime = api_.getCursorPositionEx(nullptr);
+    }
+  }
+
+  timelineTimeSeconds_.store(timelineTime);
+}

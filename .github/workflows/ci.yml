@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.preset }})
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [x64-Debug, x64-Release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake (${{ matrix.preset }})
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset build-${{ startsWith(matrix.preset, 'x64-Debug') && 'debug' || 'release' }}
+
+      - name: Locate built DLL
+        shell: pwsh
+        run: |
+          $config = if ('${{ matrix.preset }}' -eq 'x64-Release') { 'Release' } else { 'Debug' }
+          $dll = Get-Item "build/${{ matrix.preset }}/$config/reaper_holoroll.dll"
+          Write-Host "Built: $($dll.FullName) ($([math]::Round($dll.Length / 1KB, 1)) KB)"
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper_holoroll-${{ matrix.preset }}
+          path: |
+            build/${{ matrix.preset }}/Debug/reaper_holoroll.dll
+            build/${{ matrix.preset }}/Release/reaper_holoroll.dll
+          if-no-files-found: warn
+          retention-days: 14

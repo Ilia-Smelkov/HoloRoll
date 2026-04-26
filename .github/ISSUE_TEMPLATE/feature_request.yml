@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest a new feature or workflow improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the workflow or pain point. The "why" matters more than a specific solution.
+      placeholder: When working with multiple animation files, I find it hard to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (optional)
+      description: If you have an idea for how to address it, share it here. Otherwise leave blank.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
