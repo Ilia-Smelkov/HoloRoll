@@ -3,20 +3,28 @@
 #include <cstddef>
 #include <unordered_map>
 
-// Per-animation visual state. Camera orbit + object orientation + render mode
-// are remembered separately for each animation so switching regions feels
-// stable: the user can pose each animation independently.
+// Per-animation visual state. Camera + object + pivot + render mode are
+// remembered separately for each animation so switching regions feels stable.
 struct ViewportPose {
-  // Camera orbit (around object).
-  float cameraYaw = 35.0f;
-  float cameraPitch = -20.0f;
-  float cameraDistance = 0.8f;
+  // -------- Camera (Fly mode) --------
+  float cameraPosX = 0.0f;
+  float cameraPosY = 0.0f;
+  float cameraPosZ = 1.5f;
+  float cameraYaw = 0.0f;
+  float cameraPitch = 0.0f;
+  float flySpeed = 1.0f;
 
-  // Object's own rotation (mesh-local).
+  // -------- Object orientation --------
   float objectYaw = 0.0f;
   float objectPitch = 0.0f;
+  float objectRoll = 0.0f;
 
-  // Render mode index (matches GlViewport::RenderMode enum order).
+  // -------- Pivot offset (relative to bbox-centre of frame 0) --------
+  float pivotOffsetX = 0.0f;
+  float pivotOffsetY = 0.0f;
+  float pivotOffsetZ = 0.0f;
+
+  // -------- Render --------
   int renderMode = 2;  // Solid by default
 
   bool initialized = false;
@@ -24,17 +32,8 @@ struct ViewportPose {
 
 class ViewportPoses {
  public:
-  // Returns a reference to the stored pose for `animationIndex`.
-  // Creates a default-constructed pose on first access.
-  ViewportPose& Get(std::size_t animationIndex) {
-    return poses_[animationIndex];
-  }
-
-  // Save (overwrite) a pose for an animation index.
-  void Set(std::size_t animationIndex, const ViewportPose& pose) {
-    poses_[animationIndex] = pose;
-  }
-
+  ViewportPose& Get(std::size_t animationIndex) { return poses_[animationIndex]; }
+  void Set(std::size_t animationIndex, const ViewportPose& pose) { poses_[animationIndex] = pose; }
   void Clear() { poses_.clear(); }
 
  private:

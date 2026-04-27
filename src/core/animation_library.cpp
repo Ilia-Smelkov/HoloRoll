@@ -34,6 +34,33 @@ void Append(std::string* log, const std::string& line) {
     log->push_back('\n');
   }
 }
+
+// Compute the AABB of frame 0 and store its centre as the auto-pivot,
+// plus the maximum extent (used to scale the rotation gizmo).
+void ComputeRestPoseBoundingBox(LoadedAnimation& anim) {
+  if (!anim.mdd || !anim.mdd->IsLoaded()) return;
+  const auto& frame = anim.mdd->VerticesForFrame(0);
+  if (frame.empty()) return;
+
+  float minX = frame[0], minY = frame[1], minZ = frame[2];
+  float maxX = minX, maxY = minY, maxZ = minZ;
+  for (std::size_t i = 0; i + 2 < frame.size(); i += 3) {
+    const float x = frame[i + 0];
+    const float y = frame[i + 1];
+    const float z = frame[i + 2];
+    if (x < minX) minX = x; else if (x > maxX) maxX = x;
+    if (y < minY) minY = y; else if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; else if (z > maxZ) maxZ = z;
+  }
+  anim.autoPivot[0] = 0.5f * (minX + maxX);
+  anim.autoPivot[1] = 0.5f * (minY + maxY);
+  anim.autoPivot[2] = 0.5f * (minZ + maxZ);
+
+  const float ex = maxX - minX;
+  const float ey = maxY - minY;
+  const float ez = maxZ - minZ;
+  anim.autoExtent = std::max({ex, ey, ez, 0.05f});  // floor to avoid div-by-zero
+}
 }  // namespace
 
 double LoadedAnimation::DurationSeconds(double fps) const {
@@ -63,7 +90,6 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
     return 0;
   }
 
-  // 1) Enumerate .mdd and .obj separately.
   std::vector<std::string> mddFiles;
   std::vector<std::string> objFiles;
 
@@ -87,8 +113,6 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
   std::sort(mddFiles.begin(), mddFiles.end(),
             [](const std::string& a, const std::string& b) { return Stem(a) < Stem(b); });
 
-  // 2) Pre-load every OBJ once. Used both for direct-name pairing and for
-  //    vertex-count fallback pairing.
   struct LoadedObj {
     std::string path;
     std::shared_ptr<ObjIndexLoader> obj;
@@ -104,8 +128,6 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
     }
   }
 
-  // 3) For every MDD, try direct-stem match first, then fall back to
-  //    vertex-count match.
   for (const std::string& mddPath : mddFiles) {
     auto entry = std::make_unique<LoadedAnimation>();
     entry->basename = Stem(mddPath);
@@ -120,7 +142,6 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
 
     const std::uint32_t mddPoints = entry->mdd->TotalPoints();
 
-    // 3a) Direct: <basename>.obj
     bool paired = false;
     const std::string directObj = directory + "\\" + entry->basename + ".obj";
     if (FileExists(directObj)) {
@@ -130,11 +151,9 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
       }
     }
 
-    // 3b) Vertex-count fallback: pick the first OBJ with same vertex count.
     if (!paired) {
       for (const auto& candidate : loadedObjs) {
         if (candidate.obj->VertexCount() == mddPoints) {
-          // Copy the topology data into our owned loader (cheap — same indices).
           if (entry->obj->LoadFromFile(candidate.path)) {
             entry->objPath = candidate.path;
             paired = true;
@@ -151,6 +170,9 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
       Append(logOut, "[AnimationLibrary] no OBJ matched for '" + entry->basename +
                          "' (" + std::to_string(mddPoints) + " points). Points-only.");
     }
+
+    // Compute auto-pivot from rest pose AABB centre.
+    ComputeRestPoseBoundingBox(*entry);
 
     Append(logOut, "[AnimationLibrary] loaded '" + entry->basename + "' (frames=" +
                        std::to_string(entry->mdd->TotalFrames()) + ", points=" +
@@ -197,19 +219,15 @@ bool AnimationLibrary::ResolvePlayhead(double playheadSeconds,
     return true;
   }
 
-  // Find earliest start to handle "before any region".
   double earliestStart = src.front().startSeconds;
   for (const auto& r : src) earliestStart = std::min(earliestStart, r.startSeconds);
 
   if (playheadSeconds < earliestStart) {
-    // Before any region — show the first animation, frame 0.
     if (outAnimationIndex) *outAnimationIndex = src.front().animationIndex;
     if (outFrameIndex) *outFrameIndex = 0;
     return true;
   }
 
-  // Inside a region? Pick the first match.
-  // (If user manages to overlap regions, first wins — predictable.)
   for (const auto& r : src) {
     if (playheadSeconds >= r.startSeconds && playheadSeconds <= r.endSeconds) {
       const LoadedAnimation& anim = *animations_[r.animationIndex];
@@ -228,8 +246,6 @@ bool AnimationLibrary::ResolvePlayhead(double playheadSeconds,
     }
   }
 
-  // Outside any region — pick the most recent region whose end <= playhead,
-  // show its last frame.
   std::size_t bestIdx = 0;
   bool found = false;
   double bestEnd = -1.0;

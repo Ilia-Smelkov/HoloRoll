@@ -85,7 +85,7 @@ void ConsoleLog(const std::string& msg) {
   if (g_bridge.Api().showConsoleMsg) g_bridge.Api().showConsoleMsg(msg.c_str());
 }
 
-// ----- Config ↔ ExtState round-trip -----------------------------------------
+// ----- Config <-> ExtState round-trip ---------------------------------------
 
 void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeyFps)) g_config.SetDouble(kCfgKeyFps, kDefaultFps);
@@ -141,7 +141,7 @@ std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
       if (regionName.rfind(prefix, 0) == 0) {
         basename = regionName.substr(prefix.size());
       } else {
-        basename = regionName;  // user renamed — try whole name
+        basename = regionName;
       }
       const std::size_t animIdx = g_lib.FindAnimationIndexByBasename(basename);
       if (animIdx != std::numeric_limits<std::size_t>::max()) {
@@ -158,7 +158,7 @@ std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
   return out;
 }
 
-// ----- Library ↔ regions ----------------------------------------------------
+// ----- Library <-> regions --------------------------------------------------
 
 void RebuildLibraryAndRegions(const std::string& dir) {
   std::string log;
@@ -341,6 +341,14 @@ void OnTimer() {
     } else {
       status.topologyAvailable = false;
     }
+
+    // Pass auto-pivot and bbox extent of the active animation. The viewport
+    // uses these for the rotation gizmo size, the orbit centre, and the
+    // pivot-offset slider range.
+    status.autoPivot[0] = anim.autoPivot[0];
+    status.autoPivot[1] = anim.autoPivot[1];
+    status.autoPivot[2] = anim.autoPivot[2];
+    status.autoExtent = anim.autoExtent;
 
     for (const auto& r : liveRegions) {
       if (r.animationIndex == animIdx &&
