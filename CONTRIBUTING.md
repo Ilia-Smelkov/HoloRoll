@@ -5,7 +5,7 @@ is still small and process is light.
 
 ## Reporting bugs
 
-Open a [bug report](https://github.com/Ilia-Smelkov/HoloScrubber/issues/new?template=bug_report.yml).
+Open a [bug report](https://github.com/Ilia-Smelkov/HoloRoll/issues/new?template=bug_report.yml).
 Please include:
 
 - REAPER version (Help → About REAPER)
@@ -15,7 +15,7 @@ Please include:
 
 ## Suggesting features
 
-Open a [feature request](https://github.com/Ilia-Smelkov/HoloScrubber/issues/new?template=feature_request.yml).
+Open a [feature request](https://github.com/Ilia-Smelkov/HoloRoll/issues/new?template=feature_request.yml).
 Briefly describe the workflow you'd like — explaining the *why* helps more
 than describing a solution.
 
@@ -24,8 +24,8 @@ than describing a solution.
 See the [README](README.md#from-source). Short version:
 
 ```powershell
-git clone https://github.com/Ilia-Smelkov/HoloScrubber.git
-cd HoloScrubber
+git clone https://github.com/Ilia-Smelkov/HoloRoll.git
+cd HoloRoll
 .\scripts\bootstrap.ps1 -Preset x64-Debug -DeployToReaper -KillReaper -RestartReaper
 ```
 

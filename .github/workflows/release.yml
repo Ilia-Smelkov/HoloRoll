@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. 0.1.0). Leave empty to detect from CMakeLists."
+        required: false
+        type: string
+
+jobs:
+  build-installer:
+    name: Build installer (Windows)
+    runs-on: windows-latest
+
+    permissions:
+      contents: write   # required to create a Release and upload assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $manual = "${{ inputs.version }}"
+          if ($tag -match '^v(\d+\.\d+\.\d+)$') {
+            $version = $Matches[1]
+            $tagName = $tag
+          } elseif ($manual) {
+            $version = $manual
+            $tagName = "v$manual"
+          } else {
+            $cmake = Get-Content CMakeLists.txt -Raw
+            if ($cmake -match 'project\(\s*\S+\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+              $version = $Matches[1]
+              $tagName = "v$version"
+            } else {
+              throw "Could not detect version."
+            }
+          }
+          Write-Host "Resolved version: $version (tag: $tagName)"
+          "version=$version"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag_name=$tagName"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Configure CMake (Release)
+        run: cmake --preset x64-Release
+
+      - name: Build Release
+        run: cmake --build --preset build-release
+
+      - name: Verify DLL
+        shell: pwsh
+        run: |
+          $dll = "build\x64-Release\Release\reaper_holoroll.dll"
+          if (-not (Test-Path $dll)) {
+            throw "DLL not produced: $dll"
+          }
+          $kb = [math]::Round((Get-Item $dll).Length / 1KB, 1)
+          Write-Host "Built reaper_holoroll.dll ($kb KB)"
+
+      - name: Stage installer payload
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path installer\payload | Out-Null
+          Copy-Item build\x64-Release\Release\reaper_holoroll.dll installer\payload\ -Force
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.2.2 --no-progress --yes
+          # Ensure ISCC is on PATH for next step
+          "$env:ProgramFiles(x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Compile installer
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ISCC.exe "/DMyAppVersion=$env:VERSION" "/Qp" installer\holoroll.iss
+          $exe = "dist\HoloRoll-Setup-$env:VERSION.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Installer not produced at $exe"
+          }
+          $kb = [math]::Round((Get-Item $exe).Length / 1KB, 1)
+          Write-Host "Built $exe ($kb KB)"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HoloRoll-Setup-${{ steps.version.outputs.version }}
+          path: dist/HoloRoll-Setup-${{ steps.version.outputs.version }}.exe
+          retention-days: 30
+
+      - name: Create / update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: HoloRoll ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/HoloRoll-Setup-${{ steps.version.outputs.version }}.exe

@@ -5,6 +5,9 @@ dist/
 .cache/
 CMakeUserPresets.json
 
+# Installer staging directory — DLL is copied here from build/ at compile time.
+installer/payload/
+
 # --- IDE / tooling ----------------------------------------------------------
 .vs/
 .vscode/

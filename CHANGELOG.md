@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Inno Setup installer (`installer/holoroll.iss`) with REAPER-folder
+  auto-detection, headless `/SILENT` support, and custom exit codes for
+  unattended invocation.
+- `scripts/build_installer.ps1` — local one-shot build of the installer.
+- `.github/workflows/release.yml` — CI that builds the installer and
+  publishes a GitHub Release whenever a `v*.*.*` tag is pushed.
+- `docs/headless_install.md` — exit-code reference for embedding the
+  installer into other tooling.
+
 ## [0.1.0] — 2026-04-26
 
 Initial public release.
@@ -33,5 +43,5 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloScrubber/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Ilia-Smelkov/HoloScrubber/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.1.0

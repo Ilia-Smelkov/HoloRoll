@@ -40,13 +40,11 @@ timeline region and remembers its camera and object orientation between visits.
 
 ### From installer (recommended)
 
-> *Coming with v0.1.0 release.* For now, build from source.
-
 1. Download `HoloRoll-Setup-<version>.exe` from the
-   [Releases page](https://github.com/Ilia-Smelkov/HoloScrubber/releases).
-2. Run it. The installer detects your REAPER plugins folder automatically.
-3. Restart REAPER. Open `Extensions → HoloRoll → Toggle Viewport`,
-   or run the action `HoloRoll: Toggle Viewport` from the Action List.
+   [Releases page](https://github.com/Ilia-Smelkov/HoloRoll/releases).
+2. Run it. The installer detects your REAPER plugin folder automatically.
+3. Restart REAPER. Run the action `HoloRoll: Toggle Viewport` from the
+   Action List (or assign it a hotkey).
 
 The installer supports headless invocation for integration with other
 tooling — see [docs/headless_install.md](docs/headless_install.md).
@@ -62,8 +60,8 @@ Requirements:
 Build and deploy in one go:
 
 ```powershell
-git clone https://github.com/Ilia-Smelkov/HoloScrubber.git
-cd HoloScrubber
+git clone https://github.com/Ilia-Smelkov/HoloRoll.git
+cd HoloRoll
 .\scripts\bootstrap.ps1 -Preset x64-Release -DeployToReaper -KillReaper -RestartReaper
 ```
 
@@ -72,8 +70,7 @@ and (optionally) restarts REAPER for you.
 
 ## Usage
 
-1. Open the viewport: `Extensions → HoloRoll → Toggle Viewport` or via Action
-   List → `HoloRoll: Toggle Viewport`.
+1. Open the viewport via Action List → `HoloRoll: Toggle Viewport`.
 2. On first run, a folder picker asks where your `.mdd` + `.obj` files live.
    The choice is persisted to the config file and REAPER's project state.
 3. Click `Place regions` in the viewport overlay (or run
