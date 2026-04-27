@@ -70,12 +70,41 @@ jobs:
           New-Item -ItemType Directory -Force -Path installer\payload | Out-Null
           Copy-Item build\x64-Release\Release\reaper_holoroll.dll installer\payload\ -Force
 
-      - name: Install Inno Setup
+      - name: Locate or install Inno Setup
         shell: pwsh
         run: |
-          choco install innosetup --version=6.2.2 --no-progress --yes
-          # Ensure ISCC is on PATH for next step
-          "$env:ProgramFiles(x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Append
+          # GitHub's windows-latest images already ship Inno Setup 6 by default
+          # (location varies by runner image revision). Locate any existing
+          # ISCC.exe and add its folder to PATH; only install via choco as a
+          # fallback for older runner images.
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { $_ }
+
+          $found = $null
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { $found = $c; break }
+          }
+
+          if (-not $found) {
+            Write-Host "Inno Setup not found on runner. Installing via Chocolatey..."
+            choco install innosetup --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed" }
+            foreach ($c in $candidates) {
+              if (Test-Path $c) { $found = $c; break }
+            }
+          }
+
+          if (-not $found) {
+            throw "ISCC.exe still not found after install attempt."
+          }
+
+          $isccDir = Split-Path -Parent $found
+          Write-Host "Using ISCC at: $found"
+          $isccDir | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Compile installer
         shell: pwsh
