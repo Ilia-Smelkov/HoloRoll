@@ -48,9 +48,11 @@ constexpr char kConfigFileName[] = "holoroll_config.ini";
 constexpr char kCfgKeyAnimDir[] = "animations_dir";
 constexpr char kCfgKeyFps[] = "fps";
 constexpr char kCfgKeyGap[] = "region_gap_seconds";
+// Scene settings (ground plane). Persisted between sessions.
+constexpr char kCfgKeySceneShowGround[] = "scene.show_ground_plane";
+constexpr char kCfgKeySceneRadius[]     = "scene.ground_radius";
+constexpr char kCfgKeySceneGridStep[]   = "scene.grid_step";
 
-// Command names form REAPER's stable action identifiers — keep them for
-// backwards compatibility with existing user keybindings.
 constexpr char kToggleViewportCommandName[] = "MDDVIEWPORT_TOGGLE";
 constexpr char kToggleViewportActionDesc[] = "HoloRoll: Toggle Viewport";
 constexpr char kChooseFolderCommandName[] = "MDDVIEWPORT_CHOOSE_FOLDER";
@@ -64,8 +66,6 @@ constexpr char kReloadConfigActionDesc[] = "HoloRoll: Reload Config";
 
 constexpr char kViewportDockTitle[] = "HoloRoll";
 constexpr char kViewportDockIdent[] = "holoroll_docker";
-
-// ----- Path helpers ---------------------------------------------------------
 
 std::string DirOfModule(HMODULE module) {
   char buffer[MAX_PATH] = {};
@@ -81,16 +81,41 @@ std::string ConfigFilePath() {
   return dir.empty() ? std::string(kConfigFileName) : dir + "\\" + kConfigFileName;
 }
 
+constexpr bool kVerboseLog = false;
 void ConsoleLog(const std::string& msg) {
+  if (!kVerboseLog) return;
   if (g_bridge.Api().showConsoleMsg) g_bridge.Api().showConsoleMsg(msg.c_str());
 }
-
-// ----- Config <-> ExtState round-trip ---------------------------------------
 
 void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeyFps)) g_config.SetDouble(kCfgKeyFps, kDefaultFps);
   if (!g_config.Has(kCfgKeyGap)) g_config.SetDouble(kCfgKeyGap, kDefaultGapSeconds);
   if (!g_config.Has(kCfgKeyAnimDir)) g_config.SetString(kCfgKeyAnimDir, "");
+  if (!g_config.Has(kCfgKeySceneShowGround)) g_config.SetDouble(kCfgKeySceneShowGround, 1.0);
+  if (!g_config.Has(kCfgKeySceneRadius))     g_config.SetDouble(kCfgKeySceneRadius, 20.0);
+  if (!g_config.Has(kCfgKeySceneGridStep))   g_config.SetDouble(kCfgKeySceneGridStep, 1.0);
+}
+
+// Apply scene settings from config to the viewport. Called on startup and
+// after `Reload config`.
+void ApplySceneSettingsToViewport() {
+  const bool show     = g_config.GetDouble(kCfgKeySceneShowGround, 1.0) >= 0.5;
+  const float radius  = static_cast<float>(g_config.GetDouble(kCfgKeySceneRadius, 20.0));
+  const float gridStep = static_cast<float>(g_config.GetDouble(kCfgKeySceneGridStep, 1.0));
+  g_viewport.SetSceneSettings(show, radius, gridStep);
+}
+
+// Pull current scene state from viewport and write it into the config + disk.
+// Called when the overlay UI dirties the values.
+void PersistSceneSettingsFromViewport() {
+  bool show = true;
+  float radius = 20.0f;
+  float gridStep = 1.0f;
+  g_viewport.GetSceneSettings(&show, &radius, &gridStep);
+  g_config.SetDouble(kCfgKeySceneShowGround, show ? 1.0 : 0.0);
+  g_config.SetDouble(kCfgKeySceneRadius,     static_cast<double>(radius));
+  g_config.SetDouble(kCfgKeySceneGridStep,   static_cast<double>(gridStep));
+  g_config.Save();
 }
 
 std::string ResolveAnimationsDir() {
@@ -115,8 +140,6 @@ void PersistAnimationsDir(const std::string& dir) {
 
 double GetFps() { return g_config.GetDouble(kCfgKeyFps, kDefaultFps); }
 double GetGap() { return g_config.GetDouble(kCfgKeyGap, kDefaultGapSeconds); }
-
-// ----- Live regions read-back from REAPER -----------------------------------
 
 std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
   std::vector<TimelineRegion> out;
@@ -157,8 +180,6 @@ std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
   }
   return out;
 }
-
-// ----- Library <-> regions --------------------------------------------------
 
 void RebuildLibraryAndRegions(const std::string& dir) {
   std::string log;
@@ -220,8 +241,6 @@ void PlaceOurRegions() {
   ConsoleLog("[holoroll] placed " + std::to_string(g_lib.Regions().size()) + " region(s).\n");
 }
 
-// ----- Folder dialog --------------------------------------------------------
-
 void RunFolderPicker() {
   HWND owner = g_viewport.IsOpen() ? g_viewport.Hwnd() : nullptr;
   const std::string current = g_lib.Directory();
@@ -231,8 +250,6 @@ void RunFolderPicker() {
   RebuildLibraryAndRegions(chosen);
 }
 
-// ----- Viewport open/close --------------------------------------------------
-
 void OpenViewportIfNeeded() {
   if (!g_viewport.IsOpen()) {
     if (!g_viewport.Open()) return;
@@ -241,6 +258,8 @@ void OpenViewportIfNeeded() {
       api.dockWindowAddEx(g_viewport.Hwnd(), kViewportDockTitle, kViewportDockIdent, true);
       api.dockWindowActivate(g_viewport.Hwnd());
     }
+    // Apply persisted scene settings to the freshly-opened viewport.
+    ApplySceneSettingsToViewport();
   }
 }
 
@@ -251,8 +270,6 @@ void CloseViewportIfNeeded() {
     g_viewport.Close();
   }
 }
-
-// ----- Config-driven actions ------------------------------------------------
 
 void OpenConfigInEditor() {
   const std::string path = ConfigFilePath();
@@ -269,6 +286,8 @@ void ReloadConfigFromDisk() {
   } else {
     g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
   }
+  // Pick up scene settings the user may have edited in the file.
+  if (g_viewport.IsOpen()) ApplySceneSettingsToViewport();
   ConsoleLog("[holoroll] config reloaded.\n");
 }
 
@@ -284,8 +303,6 @@ bool OnMainAction(int command, int flag) {
   if (command == g_reloadConfigCommandId) { ReloadConfigFromDisk(); return true; }
   return false;
 }
-
-// ----- Per-tick logic -------------------------------------------------------
 
 void OnTimer() {
   g_bridge.OnTimerTick();
@@ -315,20 +332,10 @@ void OnTimer() {
       g_lib.ResolvePlayhead(timelineTime, GetFps(), liveRegions, &animIdx, &frame);
 
   if (resolved) {
-    if (g_activeAnimIdx != animIdx) {
-      if (g_activeAnimIdx != kNoActiveAnim) {
-        ViewportPose& prev = g_poses.Get(g_activeAnimIdx);
-        g_viewport.CapturePose(prev);
-      }
-      ViewportPose& target = g_poses.Get(animIdx);
-      if (target.initialized) {
-        g_viewport.ApplyPose(target);
-      } else {
-        g_viewport.CapturePose(target);
-      }
-      g_activeAnimIdx = animIdx;
-    }
-
+    // IMPORTANT: status.autoPivot / autoExtent must be populated BEFORE
+    // we touch pose state, because the first-time "fresh pose" branch
+    // calls ResetCameraToDefault(status), which needs those values to
+    // place the camera at the correct distance from the bbox.
     const LoadedAnimation& anim = g_lib.At(animIdx);
     if (anim.mdd && anim.mdd->IsLoaded()) {
       vertices = &anim.mdd->VerticesForFrame(frame);
@@ -342,13 +349,11 @@ void OnTimer() {
       status.topologyAvailable = false;
     }
 
-    // Pass auto-pivot and bbox extent of the active animation. The viewport
-    // uses these for the rotation gizmo size, the orbit centre, and the
-    // pivot-offset slider range.
     status.autoPivot[0] = anim.autoPivot[0];
     status.autoPivot[1] = anim.autoPivot[1];
     status.autoPivot[2] = anim.autoPivot[2];
     status.autoExtent = anim.autoExtent;
+    status.restNormals = &anim.restNormals;
 
     for (const auto& r : liveRegions) {
       if (r.animationIndex == animIdx &&
@@ -358,6 +363,25 @@ void OnTimer() {
         break;
       }
     }
+
+    // Now that status has correct bbox info, handle pose switching.
+    if (g_activeAnimIdx != animIdx) {
+      if (g_activeAnimIdx != kNoActiveAnim) {
+        ViewportPose& prev = g_poses.Get(g_activeAnimIdx);
+        g_viewport.CapturePose(prev);
+      }
+      ViewportPose& target = g_poses.Get(animIdx);
+      if (target.initialized) {
+        g_viewport.ApplyPose(target);
+      } else {
+        // Fresh animation: snap camera to a 3/4 view that frames the
+        // model's bbox at a consistent on-screen size, then capture
+        // that as the pose to remember.
+        g_viewport.ResetCameraToDefault(status);
+        g_viewport.CapturePose(target);
+      }
+      g_activeAnimIdx = animIdx;
+    }
   }
 
   g_viewport.Render(*vertices, *indices, timelineTime, frame, totalFrames, status);
@@ -365,6 +389,18 @@ void OnTimer() {
   if (g_activeAnimIdx != kNoActiveAnim) {
     ViewportPose& live = g_poses.Get(g_activeAnimIdx);
     g_viewport.CapturePose(live);
+  }
+
+  // Throttle scene-setting persistence: only check & write at most once per
+  // ~500ms of OnTimer ticks. Without this the user dragging a slider would
+  // hammer the disk every frame.
+  static ULONGLONG lastSceneSaveTick = 0;
+  const ULONGLONG nowTicks = GetTickCount64();
+  if (nowTicks - lastSceneSaveTick > 500) {
+    if (g_viewport.ConsumeSceneDirty()) {
+      PersistSceneSettingsFromViewport();
+    }
+    lastSceneSaveTick = nowTicks;
   }
 
   const GlViewport::OverlayRequests req = g_viewport.ConsumeRequests();
@@ -376,8 +412,6 @@ void OnTimer() {
   if (req.openConfig) OpenConfigInEditor();
   if (req.reloadConfig) ReloadConfigFromDisk();
 }
-
-// ----- Action registration helper ------------------------------------------
 
 bool RegisterAction(reaper_plugin_info_t* rec,
                     const char* cmdName,

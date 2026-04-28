@@ -13,18 +13,28 @@
 struct LoadedAnimation {
   std::string basename;
   std::string mddPath;
-  std::string objPath;         // empty if OBJ was missing
+  std::string objPath;
   std::unique_ptr<MDDDataManager> mdd;
   std::unique_ptr<ObjIndexLoader> obj;
 
   // Bounding-box centre of the rest pose (frame 0). Used as the default
-  // pivot for object rotation and camera orbit. The user can additionally
-  // shift the pivot via `ViewportPose::pivotOffset*`.
+  // pivot for object rotation and camera orbit.
   float autoPivot[3] = {0.0f, 0.0f, 0.0f};
 
-  // Approximate object size (max bbox extent of frame 0). Used to scale the
-  // rotation gizmo so it stays visible regardless of the model's scale.
+  // Max bbox extent of frame 0. Used to scale the rotation gizmo and the
+  // default camera distance.
   float autoExtent = 1.0f;
+
+  // Per-triangle face normals computed from the rest pose (frame 0).
+  // Layout: 3 floats per triangle, same order as `obj->TriangleIndices()`
+  // in groups of 3 indices. Empty if no OBJ is paired.
+  //
+  // We compute normals once on rest pose rather than per-frame because:
+  //   - per-frame is expensive (~1k triangles x 24 fps = constant CPU work)
+  //   - for typical character animation, face orientation drifts only
+  //     mildly over time, so rest-pose normals look fine
+  //   - if shading artefacts ever become a problem we can switch to per-frame
+  std::vector<float> restNormals;
 
   double DurationSeconds(double fps) const;
 };

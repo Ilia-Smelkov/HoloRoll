@@ -35,8 +35,6 @@ void Append(std::string* log, const std::string& line) {
   }
 }
 
-// Compute the AABB of frame 0 and store its centre as the auto-pivot,
-// plus the maximum extent (used to scale the rotation gizmo).
 void ComputeRestPoseBoundingBox(LoadedAnimation& anim) {
   if (!anim.mdd || !anim.mdd->IsLoaded()) return;
   const auto& frame = anim.mdd->VerticesForFrame(0);
@@ -59,7 +57,67 @@ void ComputeRestPoseBoundingBox(LoadedAnimation& anim) {
   const float ex = maxX - minX;
   const float ey = maxY - minY;
   const float ez = maxZ - minZ;
-  anim.autoExtent = std::max({ex, ey, ez, 0.05f});  // floor to avoid div-by-zero
+  anim.autoExtent = std::max({ex, ey, ez, 0.05f});
+}
+
+// Compute a face normal per triangle of the OBJ, evaluated against the rest
+// pose (frame 0) of the MDD. Layout: 3 floats per triangle, in the same order
+// as the index buffer iterates by groups of 3.
+void ComputeRestNormals(LoadedAnimation& anim) {
+  anim.restNormals.clear();
+  if (!anim.mdd || !anim.mdd->IsLoaded()) return;
+  if (!anim.obj || !anim.obj->IsLoaded()) return;
+
+  const auto& positions = anim.mdd->VerticesForFrame(0);
+  const auto& indices = anim.obj->TriangleIndices();
+  if (indices.size() < 3) return;
+  const std::uint32_t pointCount = anim.mdd->TotalPoints();
+
+  const std::size_t triangleCount = indices.size() / 3;
+  anim.restNormals.resize(triangleCount * 3);
+
+  for (std::size_t t = 0; t < triangleCount; ++t) {
+    const std::uint32_t i0 = indices[t * 3 + 0];
+    const std::uint32_t i1 = indices[t * 3 + 1];
+    const std::uint32_t i2 = indices[t * 3 + 2];
+
+    // Bounds-check; if anything is off, leave (0,0,0) and continue.
+    if (i0 >= pointCount || i1 >= pointCount || i2 >= pointCount) {
+      anim.restNormals[t * 3 + 0] = 0.0f;
+      anim.restNormals[t * 3 + 1] = 1.0f;
+      anim.restNormals[t * 3 + 2] = 0.0f;
+      continue;
+    }
+
+    const float ax = positions[i0 * 3 + 0];
+    const float ay = positions[i0 * 3 + 1];
+    const float az = positions[i0 * 3 + 2];
+    const float bx = positions[i1 * 3 + 0];
+    const float by = positions[i1 * 3 + 1];
+    const float bz = positions[i1 * 3 + 2];
+    const float cx = positions[i2 * 3 + 0];
+    const float cy = positions[i2 * 3 + 1];
+    const float cz = positions[i2 * 3 + 2];
+
+    // Edge vectors
+    const float e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const float e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+
+    // Cross product e1 x e2 (counter-clockwise = outward-facing assumption)
+    float nx = e1y * e2z - e1z * e2y;
+    float ny = e1z * e2x - e1x * e2z;
+    float nz = e1x * e2y - e1y * e2x;
+
+    const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (len > 1e-8f) {
+      nx /= len; ny /= len; nz /= len;
+    } else {
+      nx = 0.0f; ny = 1.0f; nz = 0.0f;  // degenerate triangle -> arbitrary
+    }
+    anim.restNormals[t * 3 + 0] = nx;
+    anim.restNormals[t * 3 + 1] = ny;
+    anim.restNormals[t * 3 + 2] = nz;
+  }
 }
 }  // namespace
 
@@ -171,8 +229,8 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
                          "' (" + std::to_string(mddPoints) + " points). Points-only.");
     }
 
-    // Compute auto-pivot from rest pose AABB centre.
     ComputeRestPoseBoundingBox(*entry);
+    ComputeRestNormals(*entry);
 
     Append(logOut, "[AnimationLibrary] loaded '" + entry->basename + "' (frames=" +
                        std::to_string(entry->mdd->TotalFrames()) + ", points=" +

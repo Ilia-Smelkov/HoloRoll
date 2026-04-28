@@ -16,13 +16,16 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDeg2Rad = kPi / 180.0f;
 constexpr float kRad2Deg = 180.0f / kPi;
 
-// ---- GL 1.5 buffer-object entry points (loaded via wglGetProcAddress) ------
+// ---- GL 1.5 buffer-object entry points -------------------------------------
 using GLsizeiptr_t = std::ptrdiff_t;
 using GLintptr_t = std::ptrdiff_t;
 
 constexpr unsigned int kGL_ARRAY_BUFFER = 0x8892;
 constexpr unsigned int kGL_ELEMENT_ARRAY_BUFFER = 0x8893;
 constexpr unsigned int kGL_DYNAMIC_DRAW = 0x88E8;
+constexpr unsigned int kGL_BLEND = 0x0BE2;
+constexpr unsigned int kGL_SRC_ALPHA = 0x0302;
+constexpr unsigned int kGL_ONE_MINUS_SRC_ALPHA = 0x0303;
 
 using PFN_glGenBuffers = void (APIENTRY*)(GLsizei, unsigned int*);
 using PFN_glDeleteBuffers = void (APIENTRY*)(GLsizei, const unsigned int*);
@@ -47,8 +50,6 @@ bool LoadBufferEntryPoints() {
   return p_glGenBuffers && p_glDeleteBuffers && p_glBindBuffer && p_glBufferData && p_glBufferSubData;
 }
 
-// ---- Matrix helpers --------------------------------------------------------
-
 bool ProjectToScreen(const float worldXYZ[3],
                      const float mv[16],
                      const float proj[16],
@@ -72,10 +73,6 @@ bool ProjectToScreen(const float worldXYZ[3],
   return true;
 }
 
-// `ringAxis` selects which world plane the arc sits in:
-//   0 -> YZ plane (x is constant)  — the gizmo arc rotates around X
-//   1 -> XZ plane (y is constant)  — the gizmo arc rotates around Y
-//   2 -> XY plane (z is constant)  — the gizmo arc rotates around Z
 float ScreenDistanceToArc(int ringAxis,
                           const float centre[3],
                           float radius,
@@ -101,18 +98,12 @@ float ScreenDistanceToArc(int ringAxis,
     float p[3];
     const float c = std::cos(t) * radius;
     const float s = std::sin(t) * radius;
-    if (ringAxis == 0) {        // YZ plane
-      p[0] = centre[0];
-      p[1] = centre[1] + c;
-      p[2] = centre[2] + s;
-    } else if (ringAxis == 1) { // XZ plane
-      p[0] = centre[0] + c;
-      p[1] = centre[1];
-      p[2] = centre[2] + s;
-    } else {                    // XY plane
-      p[0] = centre[0] + c;
-      p[1] = centre[1] + s;
-      p[2] = centre[2];
+    if (ringAxis == 0) {
+      p[0] = centre[0]; p[1] = centre[1] + c; p[2] = centre[2] + s;
+    } else if (ringAxis == 1) {
+      p[0] = centre[0] + c; p[1] = centre[1]; p[2] = centre[2] + s;
+    } else {
+      p[0] = centre[0] + c; p[1] = centre[1] + s; p[2] = centre[2];
     }
     float sx, sy;
     if (!ProjectToScreen(p, mv, proj, viewportW, viewportH, &sx, &sy)) continue;
@@ -134,19 +125,8 @@ bool ImGuiOwnsMouse() {
   return ImGui::GetIO().WantCaptureMouse;
 }
 
-// ---- Gizmo axis <-> ring plane mapping -------------------------------------
-//
-// We display 3 colored rings, but the user thinks in terms of "axis to rotate
-// around":
-//
-//   gizmoAxis 0 = X axis -> red,    ring lies in YZ plane (ringAxis 0)
-//   gizmoAxis 1 = Y axis -> blue,   ring lies in XZ plane (ringAxis 1)  -- horizontal ring
-//   gizmoAxis 2 = Z axis -> green,  ring lies in XY plane (ringAxis 2)  -- vertical ring
-//
-// (Y=blue / Z=green matches Blender's viewport gizmo, which is what the
-// MDD source typically comes from.)
-
 constexpr int kGizmoAxisToRing[3] = {0, 1, 2};
+constexpr float kLightDir[3] = {0.4f, 0.85f, 0.35f};
 }  // namespace
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -159,12 +139,10 @@ LRESULT CALLBACK GlViewport::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
   switch (msg) {
     case WM_LBUTTONDOWN:
-      if (self) {
-        if (!ImGuiOwnsMouse()) {
-          self->lmbPressed_ = true;
-          SetCapture(hwnd);
-          GetCursorPos(&self->lastMousePos_);
-        }
+      if (self && !ImGuiOwnsMouse()) {
+        self->lmbPressed_ = true;
+        SetCapture(hwnd);
+        GetCursorPos(&self->lastMousePos_);
       }
       return 0;
     case WM_LBUTTONUP:
@@ -176,12 +154,10 @@ LRESULT CALLBACK GlViewport::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       return 0;
 
     case WM_RBUTTONDOWN:
-      if (self) {
-        if (!ImGuiOwnsMouse()) {
-          self->flyMouseLook_ = true;
-          SetCapture(hwnd);
-          GetCursorPos(&self->lastMousePos_);
-        }
+      if (self && !ImGuiOwnsMouse()) {
+        self->flyMouseLook_ = true;
+        SetCapture(hwnd);
+        GetCursorPos(&self->lastMousePos_);
       }
       return 0;
     case WM_RBUTTONUP:
@@ -306,30 +282,77 @@ void GlViewport::Tick() {
   }
 }
 
+// ---- Default 3/4-perspective camera frame ----------------------------------
+//
+// Position the camera so the model's bbox occupies a consistent share of the
+// viewport, regardless of the model's actual world scale, and frame it from
+// a "Blender front-right-top" angle (yaw=-35, pitch=-25). The look target is
+// the pivot point (bbox centre + user offset), so the model ends up in the
+// centre of the screen.
+//
+// Distance is derived from the pinhole projection so that the apparent size
+// of the bbox matches `kViewportFillFraction` of the viewport's vertical
+// half-extent. With autoExtent in world units D and field-of-view fovY:
+//
+//   tan(fovY/2) = (D/2 / fillFraction) / dist
+//   dist = D / (2 * tan(fovY/2) * fillFraction)
+//
+// fillFraction = 0.6 puts the bbox at ~60% of viewport height. Smaller values
+// would leave more blank space; larger values risk clipping with rotation.
 void GlViewport::ResetCameraToDefault(const OverlayStatus& status) {
-  const float distance = std::max(0.5f, status.autoExtent * 2.5f);
+  // Default 3/4 angles. Negative yaw rotates the camera to the right of the
+  // model (so we see its left-front face). Negative pitch tilts the camera
+  // downward to look slightly down on the model.
+  constexpr float kDefaultYawDeg   = -35.0f;
+  constexpr float kDefaultPitchDeg = -25.0f;
+  constexpr float kFovYDeg         =  55.0f;
+  constexpr float kFillFraction    =  0.60f;
 
-  cameraPosTargetX_ = status.autoPivot[0] + pivotOffset_[0];
-  cameraPosTargetY_ = status.autoPivot[1] + pivotOffset_[1];
-  cameraPosTargetZ_ = status.autoPivot[2] + pivotOffset_[2] + distance;
+  // Pivot we want to look at = autoPivot + user offset (matches DrawScene).
+  const float pivotX = status.autoPivot[0] + pivotOffset_[0];
+  const float pivotY = status.autoPivot[1] + pivotOffset_[1];
+  const float pivotZ = status.autoPivot[2] + pivotOffset_[2];
 
-  // Snap immediately on reset (no smoothing surprise).
+  const float bboxDiameter = std::max(0.05f, status.autoExtent);
+  const float halfFovTan = std::tan((kFovYDeg * 0.5f) * kDeg2Rad);
+  const float distance = std::max(
+      0.5f,
+      bboxDiameter / (2.0f * halfFovTan * kFillFraction));
+
+  // Forward vector from camera angles, matching the formula in UpdateInput()
+  // and the matrix order in ApplyCameraTransform():
+  //   forward = (-sin(yaw)*cos(pitch), sin(pitch), -cos(yaw)*cos(pitch))
+  //
+  // Camera position = pivot - forward * distance (camera placed behind the
+  // model along its forward direction).
+  const float yawR   = kDefaultYawDeg   * kDeg2Rad;
+  const float pitchR = kDefaultPitchDeg * kDeg2Rad;
+  const float fx = -std::sin(yawR) * std::cos(pitchR);
+  const float fy =  std::sin(pitchR);
+  const float fz = -std::cos(yawR) * std::cos(pitchR);
+
+  cameraPosTargetX_ = pivotX - fx * distance;
+  cameraPosTargetY_ = pivotY - fy * distance;
+  cameraPosTargetZ_ = pivotZ - fz * distance;
+
+  // Snap immediately so reset feels decisive (no smoothing animation).
   cameraPosX_ = cameraPosTargetX_;
   cameraPosY_ = cameraPosTargetY_;
   cameraPosZ_ = cameraPosTargetZ_;
 
-  cameraYawTarget_ = 0.0f;
-  cameraPitchTarget_ = 0.0f;
-  cameraYaw_ = 0.0f;
-  cameraPitch_ = 0.0f;
+  cameraYawTarget_   = kDefaultYawDeg;
+  cameraPitchTarget_ = kDefaultPitchDeg;
+  cameraYaw_   = kDefaultYawDeg;
+  cameraPitch_ = kDefaultPitchDeg;
 
-  flySpeed_ = std::max(0.5f, status.autoExtent * 2.0f);
+  // Fly speed scales with model size so WASD always feels brisk regardless
+  // of whether the bbox is 0.3 units (small character) or 50 units (huge).
+  flySpeed_ = std::max(0.5f, bboxDiameter * 2.0f);
 }
 
 void GlViewport::UpdateInput(float dtSeconds) {
   if (!hwnd_) return;
 
-  // ---- Mouse delta (only when an interaction owns the mouse) ----
   int dx = 0, dy = 0;
   if (flyMouseLook_ || gizmoDragAxis_ >= 0) {
     POINT mousePos{};
@@ -339,59 +362,26 @@ void GlViewport::UpdateInput(float dtSeconds) {
     lastMousePos_ = mousePos;
   }
 
-  // ---- Fly mouse-look: write to TARGETS ----
   if (flyMouseLook_) {
     cameraYawTarget_ -= static_cast<float>(dx) * 0.2f;
     cameraPitchTarget_ = std::clamp(cameraPitchTarget_ - static_cast<float>(dy) * 0.2f, -89.0f, 89.0f);
   }
 
-  // ---- Wheel: fly speed (immediate, no smoothing — feels weird otherwise) ----
   if (std::abs(wheelDeltaSteps_) > 0.001f) {
     flySpeed_ = std::clamp(flySpeed_ * std::pow(1.15f, wheelDeltaSteps_), 0.05f, 50.0f);
     wheelDeltaSteps_ = 0.0f;
   }
 
-  // ---- WASD/QE: only while RMB held ----
-  // Forward/right are computed from the *current* camera angles (not target),
-  // so movement direction matches what the player is currently seeing.
   if (flyMouseLook_) {
     auto isDown = [](int vk) {
       return (GetAsyncKeyState(vk) & 0x8000) != 0;
     };
 
-    // Camera convention:
-    //   forward = camera looks toward -Z when yaw=pitch=0
-    //   yaw rotates camera around world Y (positive yaw -> looking right? no:
-    //     by glRotatef(-yaw, Y, ...), positive yaw rotates world by -yaw around Y,
-    //     which rotates camera by +yaw around Y -- i.e. camera turns left.
-    //     In UpdateInput we did `yaw -= dx`, so mouse-right -> yaw decreases ->
-    //     camera turns right. Forward must reflect this.)
-    //
-    // Correct forward derivation, given the matrix "Rx(-pitch) * Ry(-yaw) * T(-pos)":
-    //   The camera's local forward is (0, 0, -1).
-    //   World forward = inverse(view-rot) * (0,0,-1)
-    //                 = Ry(+yaw) * Rx(+pitch) * (0,0,-1)
-    //
-    //   Ry(+yaw) * Rx(+pitch) * (0,0,-1):
-    //     Rx(+pitch) * (0,0,-1) = (0, sin(pitch), -cos(pitch))
-    //     Ry(+yaw)  * that      = ( sin(yaw)*-cos(pitch) + 0,
-    //                                sin(pitch),
-    //                                cos(yaw)*-cos(pitch) + 0)
-    //                           = (-sin(yaw)*cos(pitch),  sin(pitch), -cos(yaw)*cos(pitch))
-    //
-    //   World right  = forward x (0,1,0):
-    //     fx = -sin(yaw)*cos(pitch);  fy = sin(pitch);  fz = -cos(yaw)*cos(pitch)
-    //     right = (fy*0 - fz*1,  fz*0 - fx*0,  fx*1 - fy*0) = (-fz, 0, fx)
-    //           = (cos(yaw)*cos(pitch), 0, -sin(yaw)*cos(pitch))
-    //   But cos(pitch) cancels (we want horizontal speed not depending on pitch),
-    //   so simplify by reading right from yaw alone:
-    //     right_horiz = (cos(yaw), 0, -sin(yaw))
     const float yawR = cameraYaw_ * kDeg2Rad;
     const float pitchR = cameraPitch_ * kDeg2Rad;
     const float fx = -std::sin(yawR) * std::cos(pitchR);
     const float fy =  std::sin(pitchR);
     const float fz = -std::cos(yawR) * std::cos(pitchR);
-    // Horizontal right (independent of pitch) — feels more natural for WASD:
     const float rx =  std::cos(yawR);
     const float rz = -std::sin(yawR);
 
@@ -410,9 +400,6 @@ void GlViewport::UpdateInput(float dtSeconds) {
     cameraPosTargetZ_ += moveZ;
   }
 
-  // ---- Smoothing: chase target with exponential decay ----
-  // Time-constant tau (seconds) — smaller = snappier, larger = floatier.
-  // 0.08s feels "responsive but not glassy" for both look and movement.
   constexpr float kTau = 0.08f;
   const float alpha = 1.0f - std::exp(-dtSeconds / kTau);
 
@@ -458,8 +445,6 @@ void GlViewport::UploadFrameToVbo(const std::vector<float>& vertices) {
 }
 
 void GlViewport::ApplyCameraTransform() {
-  // World -> eye:  pitch around X, then yaw around Y, then translate.
-  // The order matches the forward-vector derivation in UpdateInput().
   glMatrixMode(GL_MODELVIEW);
   glLoadIdentity();
   glRotatef(-cameraPitch_, 1.0f, 0.0f, 0.0f);
@@ -467,11 +452,145 @@ void GlViewport::ApplyCameraTransform() {
   glTranslatef(-cameraPosX_, -cameraPosY_, -cameraPosZ_);
 }
 
+void GlViewport::DrawBackgroundGradient() {
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+
+  glMatrixMode(GL_PROJECTION);
+  glPushMatrix();
+  glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW);
+  glPushMatrix();
+  glLoadIdentity();
+
+  const float topR = 0.18f, topG = 0.30f, topB = 0.46f;
+  const float botR = 0.07f, botG = 0.12f, botB = 0.18f;
+
+  glBegin(GL_TRIANGLE_STRIP);
+    glColor3f(botR, botG, botB); glVertex2f(-1.0f, -1.0f);
+    glColor3f(botR, botG, botB); glVertex2f( 1.0f, -1.0f);
+    glColor3f(topR, topG, topB); glVertex2f(-1.0f,  1.0f);
+    glColor3f(topR, topG, topB); glVertex2f( 1.0f,  1.0f);
+  glEnd();
+
+  glPopMatrix();
+  glMatrixMode(GL_PROJECTION);
+  glPopMatrix();
+  glMatrixMode(GL_MODELVIEW);
+
+  glDepthMask(GL_TRUE);
+  glEnable(GL_DEPTH_TEST);
+}
+
+void GlViewport::DrawGroundPlane() {
+  if (!showGroundPlane_) return;
+
+  const float radius = std::max(2.0f, groundSize_);
+  const float minorStep = std::max(0.05f, groundGridStep_);
+  const float majorStep = minorStep * 10.0f;
+
+  const float camX = cameraPosX_;
+  const float camY = cameraPosY_;
+  const float camZ = cameraPosZ_;
+
+  const float fadeStart = radius * 0.5f;
+  const float fadeEnd   = radius * 1.0f;
+  const float fadeRange = std::max(0.001f, fadeEnd - fadeStart);
+
+  auto distFade = [&](float x, float z) {
+    const float dx = x - camX;
+    const float dy = -camY;
+    const float dz = z - camZ;
+    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (d <= fadeStart) return 1.0f;
+    if (d >= fadeEnd) return 0.0f;
+    return 1.0f - (d - fadeStart) / fadeRange;
+  };
+
+  glDisable(GL_CULL_FACE);
+  glEnable(kGL_BLEND);
+  glBlendFunc(kGL_SRC_ALPHA, kGL_ONE_MINUS_SRC_ALPHA);
+  glDepthMask(GL_FALSE);
+
+  constexpr int kSegmentsPerLine = 16;
+  auto drawFadingLine = [&](float x0, float z0, float x1, float z1,
+                            float r, float g, float b, float intensity) {
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i <= kSegmentsPerLine; ++i) {
+      const float t = static_cast<float>(i) / static_cast<float>(kSegmentsPerLine);
+      const float x = x0 + (x1 - x0) * t;
+      const float z = z0 + (z1 - z0) * t;
+      const float a = distFade(x, z) * intensity;
+      glColor4f(r, g, b, a);
+      glVertex3f(x, 0.0f, z);
+    }
+    glEnd();
+  };
+
+  {
+    const float originX = std::floor(camX / minorStep) * minorStep;
+    const float originZ = std::floor(camZ / minorStep) * minorStep;
+    const int halfSteps = static_cast<int>(std::ceil(radius / minorStep));
+
+    glLineWidth(1.0f);
+    constexpr float minorR = 0.45f, minorG = 0.50f, minorB = 0.58f;
+    constexpr float minorIntensity = 0.55f;
+
+    for (int i = -halfSteps; i <= halfSteps; ++i) {
+      const float t = static_cast<float>(i) * minorStep;
+
+      const float lineX = originX + t;
+      drawFadingLine(lineX, originZ - radius, lineX, originZ + radius,
+                     minorR, minorG, minorB, minorIntensity);
+
+      const float lineZ = originZ + t;
+      drawFadingLine(originX - radius, lineZ, originX + radius, lineZ,
+                     minorR, minorG, minorB, minorIntensity);
+    }
+  }
+
+  {
+    const float originX = std::floor(camX / majorStep) * majorStep;
+    const float originZ = std::floor(camZ / majorStep) * majorStep;
+    const int halfSteps = static_cast<int>(std::ceil(radius / majorStep));
+
+    glLineWidth(1.5f);
+    constexpr float majorR = 0.70f, majorG = 0.75f, majorB = 0.85f;
+    constexpr float majorIntensity = 0.85f;
+
+    for (int i = -halfSteps; i <= halfSteps; ++i) {
+      const float t = static_cast<float>(i) * majorStep;
+
+      const float lineX = originX + t;
+      drawFadingLine(lineX, originZ - radius, lineX, originZ + radius,
+                     majorR, majorG, majorB, majorIntensity);
+
+      const float lineZ = originZ + t;
+      drawFadingLine(originX - radius, lineZ, originX + radius, lineZ,
+                     majorR, majorG, majorB, majorIntensity);
+    }
+  }
+
+  {
+    glLineWidth(2.0f);
+    drawFadingLine(-radius, 0.0f,  radius, 0.0f,  0.85f, 0.40f, 0.40f, 1.0f);
+    drawFadingLine( 0.0f, -radius,  0.0f,  radius, 0.40f, 0.80f, 0.40f, 1.0f);
+  }
+
+  glLineWidth(1.0f);
+  glDepthMask(GL_TRUE);
+  glDisable(kGL_BLEND);
+}
+
 void GlViewport::DrawScene(const std::vector<float>& vertices,
                            const std::vector<std::uint32_t>& triangleIndices,
                            double playPositionSeconds,
                            const OverlayStatus& status) {
+  (void)playPositionSeconds;
   if (vertices.empty()) return;
+
+  const std::size_t pointCount = vertices.size() / 3;
+  if (pointCount == 0) return;
 
   const float px = status.autoPivot[0] + pivotOffset_[0];
   const float py = status.autoPivot[1] + pivotOffset_[1];
@@ -484,27 +603,23 @@ void GlViewport::DrawScene(const std::vector<float>& vertices,
   glRotatef(objectRoll_,  0.0f, 0.0f, 1.0f);
   glTranslatef(-px, -py, -pz);
 
-  const float tint = static_cast<float>(std::fmod(playPositionSeconds, 1.0));
-  const std::size_t pointCount = vertices.size() / 3;
-  const bool useVbo = glBuffersAvailable_ && vboId_ != 0;
-
-  if (useVbo) {
-    p_glBindBuffer(kGL_ARRAY_BUFFER, vboId_);
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(3, GL_FLOAT, 0, nullptr);
-  }
-
   const bool noTopology = triangleIndices.empty() || !status.topologyAvailable;
   const RenderMode effectiveMode = noTopology ? RenderMode::Points : renderMode_;
 
   if (effectiveMode == RenderMode::Points) {
+    const bool useVbo = glBuffersAvailable_ && vboId_ != 0;
     glDisable(GL_CULL_FACE);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    glColor3f(0.2f + tint * 0.6f, 0.85f, 0.3f);
+    glColor3f(0.85f, 0.90f, 0.95f);
     glPointSize(pointSize_);
 
     if (useVbo) {
+      p_glBindBuffer(kGL_ARRAY_BUFFER, vboId_);
+      glEnableClientState(GL_VERTEX_ARRAY);
+      glVertexPointer(3, GL_FLOAT, 0, nullptr);
       glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(pointCount));
+      glDisableClientState(GL_VERTEX_ARRAY);
+      p_glBindBuffer(kGL_ARRAY_BUFFER, 0);
     } else {
       glBegin(GL_POINTS);
       for (std::size_t i = 0; i < pointCount; ++i) {
@@ -512,34 +627,102 @@ void GlViewport::DrawScene(const std::vector<float>& vertices,
       }
       glEnd();
     }
-  } else {
-    if (effectiveMode == RenderMode::Wireframe) {
-      glDisable(GL_CULL_FACE);
-      glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-      glColor3f(0.3f, 0.9f, 0.95f);
-    } else {
-      glDisable(GL_CULL_FACE);
-      glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-      glColor3f(0.2f + tint * 0.6f, 0.75f, 0.35f);
-    }
+  } else if (effectiveMode == RenderMode::Wireframe) {
+    glDisable(GL_CULL_FACE);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    glColor3f(0.80f, 0.85f, 0.90f);
 
-    if (useVbo && eboId_ != 0 && lastIndexCount_ > 0) {
+    const bool useVbo = glBuffersAvailable_ && vboId_ != 0 && eboId_ != 0 && lastIndexCount_ > 0;
+
+    if (useVbo) {
+      p_glBindBuffer(kGL_ARRAY_BUFFER, vboId_);
+      glEnableClientState(GL_VERTEX_ARRAY);
+      glVertexPointer(3, GL_FLOAT, 0, nullptr);
       p_glBindBuffer(kGL_ELEMENT_ARRAY_BUFFER, eboId_);
       glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(lastIndexCount_), GL_UNSIGNED_INT, nullptr);
+      glDisableClientState(GL_VERTEX_ARRAY);
+      p_glBindBuffer(kGL_ARRAY_BUFFER, 0);
+      p_glBindBuffer(kGL_ELEMENT_ARRAY_BUFFER, 0);
     } else {
       glBegin(GL_TRIANGLES);
       for (const auto idx : triangleIndices) {
+        if (idx >= pointCount) continue;
         glVertex3f(vertices[idx * 3 + 0], vertices[idx * 3 + 1] * amplitudeScale_, vertices[idx * 3 + 2]);
       }
       glEnd();
     }
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-  }
+  } else {
+    glDisable(GL_CULL_FACE);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
-  if (useVbo) {
-    glDisableClientState(GL_VERTEX_ARRAY);
-    p_glBindBuffer(kGL_ARRAY_BUFFER, 0);
-    if (eboId_ != 0) p_glBindBuffer(kGL_ELEMENT_ARRAY_BUFFER, 0);
+    auto rotateY = [](float ang, float v[3]) {
+      const float c = std::cos(ang * kDeg2Rad);
+      const float s = std::sin(ang * kDeg2Rad);
+      const float x = v[0] * c + v[2] * s;
+      const float z = -v[0] * s + v[2] * c;
+      v[0] = x; v[2] = z;
+    };
+    auto rotateX = [](float ang, float v[3]) {
+      const float c = std::cos(ang * kDeg2Rad);
+      const float s = std::sin(ang * kDeg2Rad);
+      const float y = v[1] * c - v[2] * s;
+      const float z = v[1] * s + v[2] * c;
+      v[1] = y; v[2] = z;
+    };
+    auto rotateZ = [](float ang, float v[3]) {
+      const float c = std::cos(ang * kDeg2Rad);
+      const float s = std::sin(ang * kDeg2Rad);
+      const float x = v[0] * c - v[1] * s;
+      const float y = v[0] * s + v[1] * c;
+      v[0] = x; v[1] = y;
+    };
+
+    float lightLocal[3] = {kLightDir[0], kLightDir[1], kLightDir[2]};
+    rotateZ(-objectRoll_,  lightLocal);
+    rotateX(-objectPitch_, lightLocal);
+    rotateY(-objectYaw_,   lightLocal);
+    {
+      const float L = std::sqrt(lightLocal[0]*lightLocal[0] + lightLocal[1]*lightLocal[1] + lightLocal[2]*lightLocal[2]);
+      if (L > 1e-6f) { lightLocal[0] /= L; lightLocal[1] /= L; lightLocal[2] /= L; }
+    }
+
+    const std::vector<float>* nrmPtr = status.restNormals;
+    const std::size_t triCount = triangleIndices.size() / 3;
+    const bool haveNormals = nrmPtr && nrmPtr->size() >= triCount * 3;
+
+    constexpr float kAmbient = 0.30f;
+    constexpr float kDiffuse = 0.70f;
+
+    glBegin(GL_TRIANGLES);
+    for (std::size_t t = 0; t < triCount; ++t) {
+      const std::uint32_t i0 = triangleIndices[t * 3 + 0];
+      const std::uint32_t i1 = triangleIndices[t * 3 + 1];
+      const std::uint32_t i2 = triangleIndices[t * 3 + 2];
+
+      if (i0 >= pointCount || i1 >= pointCount || i2 >= pointCount) continue;
+
+      float intensity;
+      if (haveNormals) {
+        const float nx = (*nrmPtr)[t * 3 + 0];
+        const float ny = (*nrmPtr)[t * 3 + 1];
+        const float nz = (*nrmPtr)[t * 3 + 2];
+        float ndotl = nx * lightLocal[0] + ny * lightLocal[1] + nz * lightLocal[2];
+        if (ndotl < 0.0f) ndotl = 0.0f;
+        intensity = kAmbient + kDiffuse * ndotl;
+      } else {
+        intensity = 0.7f;
+      }
+      const float r = std::min(1.0f, intensity * 1.00f);
+      const float g = std::min(1.0f, intensity * 0.98f);
+      const float b = std::min(1.0f, intensity * 0.94f);
+      glColor3f(r, g, b);
+
+      glVertex3f(vertices[i0 * 3 + 0], vertices[i0 * 3 + 1] * amplitudeScale_, vertices[i0 * 3 + 2]);
+      glVertex3f(vertices[i1 * 3 + 0], vertices[i1 * 3 + 1] * amplitudeScale_, vertices[i1 * 3 + 2]);
+      glVertex3f(vertices[i2 * 3 + 0], vertices[i2 * 3 + 1] * amplitudeScale_, vertices[i2 * 3 + 2]);
+    }
+    glEnd();
   }
 
   glPopMatrix();
@@ -553,8 +736,6 @@ void GlViewport::DrawGizmo(const float pivotWorld[3], float screenRadiusWorld) {
 
   constexpr int kSamples = 64;
 
-  // Helper that draws the arc lying in the plane perpendicular to `gizmoAxis`.
-  // gizmoAxis: 0=X (red), 1=Y (blue), 2=Z (green).
   auto drawArc = [&](int gizmoAxis, float r, float g, float b) {
     const int ringAxis = kGizmoAxisToRing[gizmoAxis];
     glColor3f(r, g, b);
@@ -564,9 +745,9 @@ void GlViewport::DrawGizmo(const float pivotWorld[3], float screenRadiusWorld) {
       const float c = std::cos(t) * screenRadiusWorld;
       const float s = std::sin(t) * screenRadiusWorld;
       float p[3] = {pivotWorld[0], pivotWorld[1], pivotWorld[2]};
-      if (ringAxis == 0) { p[1] += c; p[2] += s; }       // YZ plane
-      else if (ringAxis == 1) { p[0] += c; p[2] += s; }  // XZ plane
-      else { p[0] += c; p[1] += s; }                      // XY plane
+      if (ringAxis == 0) { p[1] += c; p[2] += s; }
+      else if (ringAxis == 1) { p[0] += c; p[2] += s; }
+      else { p[0] += c; p[1] += s; }
       glVertex3fv(p);
     }
     glEnd();
@@ -586,10 +767,9 @@ void GlViewport::DrawGizmo(const float pivotWorld[3], float screenRadiusWorld) {
   };
 
   float r, g, b;
-  // Color mapping: X=red, Y=blue, Z=green (matches Blender convention).
-  colourFor(0, 0.95f, 0.25f, 0.25f, &r, &g, &b); drawArc(0, r, g, b);  // X axis  -> red
-  colourFor(1, 0.30f, 0.45f, 1.00f, &r, &g, &b); drawArc(1, r, g, b);  // Y axis  -> blue
-  colourFor(2, 0.25f, 0.95f, 0.25f, &r, &g, &b); drawArc(2, r, g, b);  // Z axis  -> green
+  colourFor(0, 0.95f, 0.25f, 0.25f, &r, &g, &b); drawArc(0, r, g, b);
+  colourFor(1, 0.30f, 0.45f, 1.00f, &r, &g, &b); drawArc(1, r, g, b);
+  colourFor(2, 0.25f, 0.95f, 0.25f, &r, &g, &b); drawArc(2, r, g, b);
 
   glLineWidth(1.0f);
   glEnable(GL_DEPTH_TEST);
@@ -627,13 +807,12 @@ void GlViewport::GizmoHitTestAndDrag(const float pivotWorld[3], float screenRadi
     while (deltaDeg < -180.0f) deltaDeg += 360.0f;
 
     const float newRot = gizmoDragStartRotation_ + deltaDeg;
-    if (gizmoDragAxis_ == 0) objectPitch_ = newRot;       // X axis -> Pitch
-    else if (gizmoDragAxis_ == 1) objectYaw_ = newRot;    // Y axis -> Yaw
-    else objectRoll_ = newRot;                            // Z axis -> Roll
+    if (gizmoDragAxis_ == 0) objectPitch_ = newRot;
+    else if (gizmoDragAxis_ == 1) objectYaw_ = newRot;
+    else objectRoll_ = newRot;
     return;
   }
 
-  // Hover test against all 3 rings.
   float bestDist = 1e30f;
   int bestGizmoAxis = -1;
   float bestAngle = 0.0f;
@@ -653,7 +832,6 @@ void GlViewport::GizmoHitTestAndDrag(const float pivotWorld[3], float screenRadi
 
   if (bestDist < kPickThresholdPx) {
     gizmoHoverAxis_ = bestGizmoAxis;
-
     if (lmbPressed_ && gizmoDragAxis_ < 0) {
       gizmoDragAxis_ = bestGizmoAxis;
       gizmoDragStartAngle_ = bestAngle;
@@ -713,7 +891,6 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     ImGui::Text("Playhead: %.3f s", playPositionSeconds);
     ImGui::Text("Frame: %u / %u", frameIndex, totalFrames > 0 ? totalFrames - 1 : 0);
     ImGui::Text("Points: %u", static_cast<unsigned>(vertexCount / 3));
-    ImGui::Text("VBO: %s", glBuffersAvailable_ ? "active (glBufferSubData)" : "fallback (immediate mode)");
     if (smoothedFrameMs_ > 0.0) {
       ImGui::Text("Frame time: %.2f ms (%.1f FPS)", smoothedFrameMs_, 1000.0 / smoothedFrameMs_);
     }
@@ -729,8 +906,6 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
 
   if (ImGui::CollapsingHeader("Object", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Checkbox("Show rotation gizmo", &showGizmo_);
-    // DragFloat with low speed -> finer control than SliderFloat over ±360.
-    // Hold Shift while dragging for even finer increments.
     constexpr float kRotMin = -360.0f;
     constexpr float kRotMax =  360.0f;
     constexpr float kRotSpeed = 0.5f;
@@ -750,6 +925,12 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     if (ImGui::Button("Reset pivot")) {
       pivotOffset_[0] = pivotOffset_[1] = pivotOffset_[2] = 0.0f;
     }
+  }
+
+  if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::Checkbox("Show ground plane", &showGroundPlane_)) sceneDirty_ = true;
+    if (ImGui::SliderFloat("Visible radius", &groundSize_, 5.0f, 200.0f, "%.0f")) sceneDirty_ = true;
+    if (ImGui::SliderFloat("Grid step", &groundGridStep_, 0.05f, 5.0f, "%.2f")) sceneDirty_ = true;
   }
 
   if (ImGui::CollapsingHeader("Render", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -797,13 +978,14 @@ void GlViewport::Render(const std::vector<float>& vertices,
   const float aspect = static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_);
   const float fovYDeg = 55.0f;
   const float nearZ = 0.01f;
-  const float farZ = 200.0f;
+  const float farZ = 500.0f;
   const float top = nearZ * std::tan((fovYDeg * 0.5f) * kDeg2Rad);
   const float right = top * aspect;
 
   glViewport(0, 0, viewportWidth_, viewportHeight_);
-  glClearColor(0.05f, 0.06f, 0.08f, 1.0f);
-  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glClear(GL_DEPTH_BUFFER_BIT);
+
+  DrawBackgroundGradient();
 
   glMatrixMode(GL_PROJECTION);
   glLoadIdentity();
@@ -819,7 +1001,8 @@ void GlViewport::Render(const std::vector<float>& vertices,
   ApplyCameraTransform();
   glGetFloatv(GL_MODELVIEW_MATRIX, matModelView_);
 
-  // Gizmo radius = ~18% of viewport height, regardless of zoom.
+  DrawGroundPlane();
+
   const float dx = pivotWorld[0] - cameraPosX_;
   const float dy = pivotWorld[1] - cameraPosY_;
   const float dz = pivotWorld[2] - cameraPosZ_;
@@ -887,4 +1070,24 @@ void GlViewport::CapturePose(ViewportPose& out) const {
 
   out.renderMode = static_cast<int>(renderMode_);
   out.initialized = true;
+}
+
+// ---- Persisted scene settings API ------------------------------------------
+
+void GlViewport::SetSceneSettings(bool showGround, float radius, float gridStep) {
+  showGroundPlane_ = showGround;
+  groundSize_ = radius;
+  groundGridStep_ = gridStep;
+}
+
+void GlViewport::GetSceneSettings(bool* showGround, float* radius, float* gridStep) const {
+  if (showGround) *showGround = showGroundPlane_;
+  if (radius) *radius = groundSize_;
+  if (gridStep) *gridStep = groundGridStep_;
+}
+
+bool GlViewport::ConsumeSceneDirty() {
+  const bool was = sceneDirty_;
+  sceneDirty_ = false;
+  return was;
 }

@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-28
+
+Lit shading, sky background, infinite-feeling ground grid. The viewport
+now looks like a real 3D scene rather than a debug widget.
+
+### Added
+- **Per-face Lambert shading** in Solid mode. Each triangle gets its own
+  flat-shaded grayscale tone derived from its normal and a fixed light
+  direction; shape and orientation are now legible at a glance.
+- Per-triangle face normals computed once on rest pose during animation
+  load (`LoadedAnimation::restNormals`).
+- **Vertical sky gradient** as the viewport background, replacing the
+  flat dark clear colour. Matches Unreal-ish editor tones.
+- **Infinite-feeling ground grid**: minor + major lines, both follow the
+  camera in XZ, fade with 3D distance, never show a hard edge. World
+  axis lines (X red, Z green) pass through the actual world origin so
+  the user can see where (0,0,0) is.
+- **3/4-perspective default camera framing.** Newly-loaded animations
+  now snap to a Blender-style front-right-top view (yaw=-35°, pitch=-25°)
+  with the camera distance derived from the model's bbox so the model
+  appears at a consistent ~60% of viewport height regardless of its
+  world-scale. Same logic powers the `Reset camera` button.
+- **Persisted scene settings** in `holoroll_config.ini`:
+  `scene.show_ground_plane`, `scene.ground_radius`, `scene.grid_step`.
+  Toggling the checkbox or moving the sliders now survives a REAPER
+  restart. Editing the file directly and using `Reload config` also
+  applies the new values.
+
+### Changed
+- Camera far-plane increased from 200 to 500 units so distant grid lines
+  remain in the frustum.
+- Render-mode tinting that varied with playhead time has been removed.
+  Solid is now per-face Lambert, Wireframe and Points are flat off-white.
+  The old time-tint was a debug hack from the prototype.
+- REAPER console output silenced by default (`kVerboseLog = false` in
+  `entry.cpp`). The plugin no longer spams the console on every folder
+  scan, region build, or config reload. Flip the constant to re-enable
+  for debugging.
+
+### Fixed
+- **Hard crash** (`vector subscript out of range`) when an OBJ paired by
+  vertex-count happened to reference indices past the end of the MDD's
+  per-frame vertex list. Solid and Wireframe immediate-mode paths now
+  bounds-check every triangle and skip bad ones instead of crashing.
+
 ## [0.2.0] — 2026-04-28
 
 Camera rework, rotation gizmo, configurable pivot. First end-to-end usable
@@ -44,8 +89,7 @@ build for browsing model libraries, not just verifying playback works.
 ### Fixed
 - CMake build presets now explicitly select `Release` / `Debug`
   configuration so MSBuild doesn't silently emit Debug binaries when the
-  user asked for Release. (Previous bootstrap step would put `.dll`
-  under `build\x64-Release\Debug\`.)
+  user asked for Release.
 
 ### Added (in [Unreleased] from 0.1.0 → 0.2.0)
 - Inno Setup installer (`installer/holoroll.iss`).
@@ -79,6 +123,7 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.1.0
