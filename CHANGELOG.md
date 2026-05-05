@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-05-05
+
+Patch fixing GLB files with embedded textures.
+
+### Fixed
+- **CesiumMan and other textured GLB samples now load correctly.** The
+  v0.5.0 build set `TINYGLTF_NO_STB_IMAGE` to skip the stb image stack
+  (we don't render textures), but tinygltf's default behaviour is to
+  return an error from the *whole parse* if it encounters an `image`
+  block with no loader registered. Geometry and animation data were
+  fully extractable but never reached our code. The loader now
+  registers a no-op image callback that succeeds with a placeholder
+  1x1 white pixel; image data is never sampled downstream so the
+  placeholder is harmless.
+
 ## [0.5.0] — 2026-05-05
 
 GLB skeletal-animation support. Drop a Blender-exported skinned `.glb`
@@ -54,15 +69,11 @@ separate companion files needed (topology and skin live inside the GLB).
   scale or offset.
 
 ### Known issues
-- Some GLB files (e.g. CesiumMan.glb from the Khronos sample assets)
-  fail to load or render incorrectly. Smaller test models like
-  RiggedSimple and RiggedFigure work fine, so the loader's core path
-  is correct; the failure mode is most likely related to non-identity
-  mesh-node transforms or CUBICSPLINE channels in those specific files.
-  Tracking for v0.5.1.
+- ~~Some GLB files (e.g. CesiumMan.glb from the Khronos sample assets)
+  fail to load or render incorrectly.~~ Fixed in v0.5.1.
 - Hot-reload watcher may not pick up new GLB files dropped into the
   watched folder after the initial scan. Re-selecting the same folder
-  via `Choose folder...` works around this. Tracking for v0.5.1.
+  via `Choose folder...` works around this. Tracking for v0.5.2.
 
 ## [0.4.0] — 2026-05-05
 
@@ -218,7 +229,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.5.1
 [0.5.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.3.0

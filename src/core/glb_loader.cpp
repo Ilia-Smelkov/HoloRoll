@@ -28,6 +28,40 @@ using Vec3 = std::array<float, 3>;
 using Vec4 = std::array<float, 4>;
 using Quat = std::array<float, 4>;  // x, y, z, w
 
+// ---- Image loader callback (no-op) ----------------------------------------
+//
+// We compile tinygltf with TINYGLTF_NO_STB_IMAGE to avoid pulling in the stb
+// image stack (we don't render textures — Solid mode is per-face Lambert).
+// However, when tinygltf encounters an `image` block in a glTF file and no
+// image loader is set, it returns FALSE for the whole parse — even though
+// the geometry/animation/skinning data is fully readable.
+//
+// CesiumMan and most other Khronos sample assets embed a JPEG/PNG diffuse
+// texture, so without this callback they fail to load while bare-skinned
+// files like RiggedSimple/RiggedFigure work.
+//
+// The fix: register a callback that simply marks the image as a 1x1 white
+// pixel and returns success. The image data is never used downstream
+// (we don't sample textures), so any plausible-looking content is fine.
+bool DummyImageLoader(tinygltf::Image* image,
+                      const int /*image_idx*/,
+                      std::string* /*err*/,
+                      std::string* /*warn*/,
+                      int /*req_width*/,
+                      int /*req_height*/,
+                      const unsigned char* /*bytes*/,
+                      int /*size*/,
+                      void* /*user_data*/) {
+  // 1x1 RGBA white. Anything tinygltf considers valid is OK — we never read it.
+  image->width = 1;
+  image->height = 1;
+  image->component = 4;
+  image->bits = 8;
+  image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+  image->image = {255, 255, 255, 255};
+  return true;
+}
+
 constexpr Mat4 kIdentity = {
     1, 0, 0, 0,
     0, 1, 0, 0,
@@ -496,6 +530,7 @@ std::size_t GlbLoader::CountAnimations(const std::string& path,
                                        std::vector<std::string>* outAnimationNames,
                                        std::string* outError) {
   tinygltf::TinyGLTF loader;
+  loader.SetImageLoader(DummyImageLoader, nullptr);
   tinygltf::Model model;
   std::string err, warn;
   const bool ok = loader.LoadBinaryFromFile(&model, &err, &warn, path);
@@ -523,6 +558,7 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
   animationName_.clear();
 
   tinygltf::TinyGLTF loader;
+  loader.SetImageLoader(DummyImageLoader, nullptr);
   tinygltf::Model model;
   std::string err, warn;
   if (!loader.LoadBinaryFromFile(&model, &err, &warn, path)) {
