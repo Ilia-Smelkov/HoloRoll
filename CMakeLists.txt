@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(reaper_holoroll VERSION 0.4.0 LANGUAGES CXX)
+project(reaper_holoroll VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,6 +27,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+# tinygltf: header-only glTF/GLB parser. Pulls in nlohmann/json automatically.
+# We only need geometry + skinning + animations, so disable the image stack
+# (no stb_image dependency, no decoded image data in memory).
+FetchContent_Declare(
+  tinygltf
+  GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
+  GIT_TAG v2.9.3
+)
+FetchContent_MakeAvailable(tinygltf)
+
 add_library(reaper_holoroll SHARED
   src/extension/entry.cpp
   src/extension/reaper_bridge.cpp
@@ -36,6 +46,7 @@ add_library(reaper_holoroll SHARED
   src/core/animation_library.cpp
   src/core/config_store.cpp
   src/core/folder_watcher.cpp
+  src/core/glb_loader.cpp
   src/render/gl_viewport.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -49,6 +60,7 @@ target_include_directories(reaper_holoroll PRIVATE
   "${REAPER_SDK_DIR}"
   "${imgui_SOURCE_DIR}"
   "${imgui_SOURCE_DIR}/backends"
+  "${tinygltf_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
@@ -56,6 +68,10 @@ target_compile_definitions(reaper_holoroll PRIVATE
   WIN32_LEAN_AND_MEAN
   NOMINMAX
   REAPERAPI_WANT_EXTENSIONS
+  # tinygltf knobs: we don't need image decoding for skinned meshes.
+  TINYGLTF_NO_STB_IMAGE
+  TINYGLTF_NO_STB_IMAGE_WRITE
+  TINYGLTF_NO_EXTERNAL_IMAGE
 )
 
 target_link_libraries(reaper_holoroll PRIVATE

@@ -36,8 +36,7 @@ void Append(std::string* log, const std::string& line) {
 }
 
 void ComputeRestPoseBoundingBox(LoadedAnimation& anim) {
-  if (!anim.mdd || !anim.mdd->IsLoaded()) return;
-  const auto& frame = anim.mdd->VerticesForFrame(0);
+  const auto& frame = anim.VerticesForFrame(0);
   if (frame.empty()) return;
 
   float minX = frame[0], minY = frame[1], minZ = frame[2];
@@ -65,13 +64,12 @@ void ComputeRestPoseBoundingBox(LoadedAnimation& anim) {
 // as the index buffer iterates by groups of 3.
 void ComputeRestNormals(LoadedAnimation& anim) {
   anim.restNormals.clear();
-  if (!anim.mdd || !anim.mdd->IsLoaded()) return;
-  if (!anim.obj || !anim.obj->IsLoaded()) return;
-
-  const auto& positions = anim.mdd->VerticesForFrame(0);
-  const auto& indices = anim.obj->TriangleIndices();
-  if (indices.size() < 3) return;
-  const std::uint32_t pointCount = anim.mdd->TotalPoints();
+  const auto& positions = anim.VerticesForFrame(0);
+  if (positions.empty()) return;
+  const auto* indicesPtr = anim.TriangleIndicesPtr();
+  if (!indicesPtr || indicesPtr->size() < 3) return;
+  const auto& indices = *indicesPtr;
+  const std::uint32_t pointCount = anim.TotalPoints();
 
   const std::size_t triangleCount = indices.size() / 3;
   anim.restNormals.resize(triangleCount * 3);
@@ -157,8 +155,43 @@ std::string AnimationLibrary::StripPrefix(const std::string& regionName) {
 // ---- LoadedAnimation --------------------------------------------------------
 
 double LoadedAnimation::DurationSeconds(double fps) const {
-  if (!mdd || !mdd->IsLoaded() || fps <= 0.0) return 0.0;
-  return static_cast<double>(mdd->TotalFrames()) / fps;
+  if (fps <= 0.0) return 0.0;
+  if (mdd && mdd->IsLoaded()) {
+    return static_cast<double>(mdd->TotalFrames()) / fps;
+  }
+  if (glb && glb->IsLoaded()) {
+    return static_cast<double>(glb->TotalFrames()) / fps;
+  }
+  return 0.0;
+}
+
+std::uint32_t LoadedAnimation::TotalFrames() const {
+  if (mdd && mdd->IsLoaded()) return mdd->TotalFrames();
+  if (glb && glb->IsLoaded()) return glb->TotalFrames();
+  return 0;
+}
+
+std::uint32_t LoadedAnimation::TotalPoints() const {
+  if (mdd && mdd->IsLoaded()) return mdd->TotalPoints();
+  if (glb && glb->IsLoaded()) return glb->TotalPoints();
+  return 0;
+}
+
+const std::vector<float>& LoadedAnimation::VerticesForFrame(std::uint32_t frame) const {
+  static const std::vector<float> empty;
+  if (mdd && mdd->IsLoaded()) return mdd->VerticesForFrame(frame);
+  if (glb && glb->IsLoaded()) return glb->VerticesForFrame(frame);
+  return empty;
+}
+
+const std::vector<std::uint32_t>* LoadedAnimation::TriangleIndicesPtr() const {
+  if (obj && obj->IsLoaded()) return &obj->TriangleIndices();
+  if (glb && glb->IsLoaded()) return &glb->TriangleIndices();
+  return nullptr;
+}
+
+bool LoadedAnimation::HasTopology() const {
+  return TriangleIndicesPtr() != nullptr;
 }
 
 // ---- AnimationLibrary -------------------------------------------------------
@@ -176,7 +209,9 @@ std::size_t AnimationLibrary::FindAnimationIndexByBasename(const std::string& ba
   return std::numeric_limits<std::size_t>::max();
 }
 
-std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::string* logOut) {
+std::size_t AnimationLibrary::ScanFolder(const std::string& directory,
+                                         double fps,
+                                         std::string* logOut) {
   Clear();
   directory_ = directory;
 
@@ -187,6 +222,7 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
 
   std::vector<std::string> mddFiles;
   std::vector<std::string> objFiles;
+  std::vector<std::string> glbFiles;
 
   WIN32_FIND_DATAA fd{};
   const std::string pattern = directory + "\\*.*";
@@ -200,14 +236,18 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
     const std::string name = fd.cFileName;
     const std::string ext = LowerExt(name);
     const std::string full = directory + "\\" + name;
-    if (ext == ".mdd") mddFiles.push_back(full);
+    if      (ext == ".mdd") mddFiles.push_back(full);
     else if (ext == ".obj") objFiles.push_back(full);
+    else if (ext == ".glb") glbFiles.push_back(full);
   } while (FindNextFileA(h, &fd));
   FindClose(h);
 
-  std::sort(mddFiles.begin(), mddFiles.end(),
-            [](const std::string& a, const std::string& b) { return Stem(a) < Stem(b); });
+  // Sort each group alphabetically by stem so region order is stable.
+  auto byStem = [](const std::string& a, const std::string& b) { return Stem(a) < Stem(b); };
+  std::sort(mddFiles.begin(), mddFiles.end(), byStem);
+  std::sort(glbFiles.begin(), glbFiles.end(), byStem);
 
+  // ---- Load OBJs once into a vertex-count lookup table for MDD pairing ---
   struct LoadedObj {
     std::string path;
     std::shared_ptr<ObjIndexLoader> obj;
@@ -223,15 +263,18 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
     }
   }
 
+  // ---- Pass 1: MDD files (with optional OBJ pairing) -----------------------
   for (const std::string& mddPath : mddFiles) {
     auto entry = std::make_unique<LoadedAnimation>();
     entry->basename = Stem(mddPath);
+    entry->sourcePath = mddPath;
     entry->mddPath = mddPath;
     entry->mdd = std::make_unique<MDDDataManager>();
     entry->obj = std::make_unique<ObjIndexLoader>();
 
     if (!entry->mdd->LoadFromFile(mddPath)) {
-      Append(logOut, "[AnimationLibrary] FAILED MDD: " + mddPath + " (" + entry->mdd->LastError() + ")");
+      Append(logOut, "[AnimationLibrary] FAILED MDD: " + mddPath +
+                         " (" + entry->mdd->LastError() + ")");
       continue;
     }
 
@@ -245,7 +288,6 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
         paired = true;
       }
     }
-
     if (!paired) {
       for (const auto& candidate : loadedObjs) {
         if (candidate.obj->VertexCount() == mddPoints) {
@@ -260,8 +302,9 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
         }
       }
     }
-
     if (!paired) {
+      // Drop the unloaded ObjIndexLoader so HasTopology() returns false.
+      entry->obj.reset();
       Append(logOut, "[AnimationLibrary] no OBJ matched for '" + entry->basename +
                          "' (" + std::to_string(mddPoints) + " points). Points-only.");
     }
@@ -269,11 +312,56 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory, std::stri
     ComputeRestPoseBoundingBox(*entry);
     ComputeRestNormals(*entry);
 
-    Append(logOut, "[AnimationLibrary] loaded '" + entry->basename + "' (frames=" +
+    Append(logOut, "[AnimationLibrary] loaded MDD '" + entry->basename + "' (frames=" +
                        std::to_string(entry->mdd->TotalFrames()) + ", points=" +
                        std::to_string(entry->mdd->TotalPoints()) + ", obj=" +
                        (paired ? "yes" : "no") + ")");
     animations_.push_back(std::move(entry));
+  }
+
+  // ---- Pass 2: GLB files ----------------------------------------------------
+  // Each animation in the file becomes its own LoadedAnimation. Naming:
+  //   1 animation in file:   basename = file stem
+  //   N animations in file:  basename = "<stem>.<animName-or-index>"
+  for (const std::string& glbPath : glbFiles) {
+    const std::string stem = Stem(glbPath);
+    std::vector<std::string> animNames;
+    std::string countErr;
+    const std::size_t animCount = GlbLoader::CountAnimations(glbPath, &animNames, &countErr);
+    if (animCount == 0) {
+      Append(logOut, "[AnimationLibrary] GLB '" + stem + "' has no animations or failed to parse: " + countErr);
+      continue;
+    }
+
+    for (std::size_t a = 0; a < animCount; ++a) {
+      auto entry = std::make_unique<LoadedAnimation>();
+      entry->sourcePath = glbPath;
+      entry->glb = std::make_unique<GlbLoader>();
+
+      if (!entry->glb->LoadFromFileAtIndex(glbPath, a, fps)) {
+        Append(logOut, "[AnimationLibrary] FAILED GLB '" + stem + "' anim #" +
+                           std::to_string(a) + ": " + entry->glb->LastError());
+        continue;
+      }
+
+      // Build basename. Single-animation files keep the simple stem; files
+      // with multiple animations get a "<stem>.<animName>" composite, with
+      // a numeric fallback for unnamed channels.
+      if (animCount == 1) {
+        entry->basename = stem;
+      } else {
+        const std::string& animName = animNames[a];
+        entry->basename = stem + "." + (animName.empty() ? std::to_string(a) : animName);
+      }
+
+      ComputeRestPoseBoundingBox(*entry);
+      ComputeRestNormals(*entry);
+
+      Append(logOut, "[AnimationLibrary] loaded GLB '" + entry->basename + "' (frames=" +
+                         std::to_string(entry->glb->TotalFrames()) + ", points=" +
+                         std::to_string(entry->glb->TotalPoints()) + ")");
+      animations_.push_back(std::move(entry));
+    }
   }
 
   return animations_.size();
@@ -326,12 +414,13 @@ bool AnimationLibrary::ResolvePlayhead(double playheadSeconds,
   for (const auto& r : src) {
     if (playheadSeconds >= r.startSeconds && playheadSeconds <= r.endSeconds) {
       const LoadedAnimation& anim = *animations_[r.animationIndex];
-      if (!anim.mdd || !anim.mdd->IsLoaded()) {
+      const std::uint32_t totalFrames = anim.TotalFrames();
+      if (totalFrames == 0) {
         if (outAnimationIndex) *outAnimationIndex = r.animationIndex;
         if (outFrameIndex) *outFrameIndex = 0;
         return true;
       }
-      const std::uint32_t lastFrame = anim.mdd->TotalFrames() - 1;
+      const std::uint32_t lastFrame = totalFrames - 1;
       const double localTime = playheadSeconds - r.startSeconds;
       double f = std::floor(std::max(0.0, localTime) * fps);
       if (f > static_cast<double>(lastFrame)) f = static_cast<double>(lastFrame);
@@ -359,8 +448,8 @@ bool AnimationLibrary::ResolvePlayhead(double playheadSeconds,
 
   const TimelineRegion& last = src[bestIdx];
   const LoadedAnimation& anim = *animations_[last.animationIndex];
-  const std::uint32_t lastFrame =
-      (anim.mdd && anim.mdd->IsLoaded()) ? anim.mdd->TotalFrames() - 1 : 0;
+  const std::uint32_t totalFrames = anim.TotalFrames();
+  const std::uint32_t lastFrame = totalFrames > 0 ? totalFrames - 1 : 0;
   if (outAnimationIndex) *outAnimationIndex = last.animationIndex;
   if (outFrameIndex) *outFrameIndex = lastFrame;
   return true;

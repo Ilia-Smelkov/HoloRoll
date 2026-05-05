@@ -209,7 +209,7 @@ std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
 
 void RebuildLibraryAndRegions(const std::string& dir) {
   std::string log;
-  const std::size_t loaded = g_lib.ScanFolder(dir, &log);
+  const std::size_t loaded = g_lib.ScanFolder(dir, GetFps(), &log);
   g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
   if (!log.empty()) ConsoleLog(log);
   ConsoleLog("[holoroll] library: " + std::to_string(loaded) +
@@ -287,7 +287,7 @@ void PlaceOurRegions() {
 void RunFolderPicker() {
   HWND owner = g_viewport.IsOpen() ? g_viewport.Hwnd() : nullptr;
   const std::string current = g_lib.Directory();
-  const std::string chosen = folder_picker::BrowseForFolder(owner, "Select MDD animations folder", current);
+  const std::string chosen = folder_picker::BrowseForFolder(owner, "Select animations folder (.mdd / .glb)", current);
   if (chosen.empty()) return;
   PersistAnimationsDir(chosen);
   RebuildLibraryAndRegions(chosen);
@@ -399,7 +399,7 @@ void ProcessWatcherEvents() {
   std::string log;
   const std::string dir = g_lib.Directory();
   if (dir.empty()) return;
-  g_lib.ScanFolder(dir, &log);
+  g_lib.ScanFolder(dir, GetFps(), &log);
   g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
   if (!log.empty()) ConsoleLog(log);
 
@@ -516,13 +516,14 @@ void OnTimer() {
     // calls ResetCameraToDefault(status), which needs those values to
     // place the camera at the correct distance from the bbox.
     const LoadedAnimation& anim = g_lib.At(animIdx);
-    if (anim.mdd && anim.mdd->IsLoaded()) {
-      vertices = &anim.mdd->VerticesForFrame(frame);
-      totalFrames = anim.mdd->TotalFrames();
+    const std::uint32_t totalPoints = anim.TotalPoints();
+    if (totalPoints > 0) {
+      vertices = &anim.VerticesForFrame(frame);
+      totalFrames = anim.TotalFrames();
       status.currentAnimation = anim.basename;
     }
-    if (anim.obj && anim.obj->IsLoaded()) {
-      indices = &anim.obj->TriangleIndices();
+    if (anim.HasTopology()) {
+      indices = anim.TriangleIndicesPtr();
       status.topologyAvailable = true;
     } else {
       status.topologyAvailable = false;
@@ -658,7 +659,7 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
 
   std::string animDir = ResolveAnimationsDir();
   if (animDir.empty()) {
-    animDir = folder_picker::BrowseForFolder(nullptr, "Select MDD animations folder", "");
+    animDir = folder_picker::BrowseForFolder(nullptr, "Select animations folder (.mdd / .glb)", "");
     if (!animDir.empty()) PersistAnimationsDir(animDir);
   }
 

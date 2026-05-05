@@ -5,17 +5,25 @@
 #include <string>
 #include <vector>
 
+#include "core/glb_loader.h"
 #include "core/mdd_data_manager.h"
 #include "core/obj_index_loader.h"
 
-// Single loaded animation: one MDD (per-frame point cache) paired with one OBJ
-// (topology used by Wireframe / Solid render modes).
+// Single loaded animation. Source can be either an MDD/OBJ pair OR a single
+// GLB file (with skeletal animation baked into per-frame vertex positions).
+// Exactly one of `mdd` or `glb` is non-null after a successful load.
 struct LoadedAnimation {
-  std::string basename;
+  std::string basename;       // What appears in the region name.
+  std::string sourcePath;     // Path of the loaded file (.mdd or .glb).
+  std::string objPath;        // Only set when source is MDD with a paired OBJ.
+
+  // MDD path retained as a separate field for backward compatibility with
+  // any code (or future tools) that need it specifically.
   std::string mddPath;
-  std::string objPath;
+
   std::unique_ptr<MDDDataManager> mdd;
   std::unique_ptr<ObjIndexLoader> obj;
+  std::unique_ptr<GlbLoader> glb;
 
   // Bounding-box centre of the rest pose (frame 0). Used as the default
   // pivot for object rotation and camera orbit.
@@ -29,6 +37,14 @@ struct LoadedAnimation {
   std::vector<float> restNormals;
 
   double DurationSeconds(double fps) const;
+
+  // Source-agnostic accessors. Always prefer these over poking at
+  // `mdd` / `glb` directly.
+  std::uint32_t TotalFrames() const;
+  std::uint32_t TotalPoints() const;
+  const std::vector<float>& VerticesForFrame(std::uint32_t frame) const;
+  const std::vector<std::uint32_t>* TriangleIndicesPtr() const;
+  bool HasTopology() const;
 };
 
 struct TimelineRegion {
@@ -40,7 +56,7 @@ struct TimelineRegion {
 
 class AnimationLibrary {
  public:
-  std::size_t ScanFolder(const std::string& directory, std::string* logOut = nullptr);
+  std::size_t ScanFolder(const std::string& directory, double fps, std::string* logOut = nullptr);
 
   void Clear();
 

@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-05
+
+GLB skeletal-animation support. Drop a Blender-exported skinned `.glb`
+into your animations folder and HoloRoll renders it the same way it
+renders MDD: regions, playhead sync, Lambert shading, all of it. No
+separate companion files needed (topology and skin live inside the GLB).
+
+### Added
+- **GLB import** for skeletal animation. CPU linear-blend skinning baked
+  to per-frame vertex positions on load, in the same memory layout as
+  MDD so the render pipeline is unchanged.
+- Multiple animations per file: a `.glb` containing N animations becomes
+  N separate `LoadedAnimation` entries with basenames
+  `<filestem>.<animname>` (or `<filestem>.<index>` for unnamed channels).
+  A single-animation `.glb` keeps the simple `<filestem>` basename.
+- Interpolation support: LINEAR + STEP. CUBICSPLINE channels fall back
+  to LINEAR sampling.
+- New dependency: [tinygltf](https://github.com/syoyo/tinygltf) v2.9.3
+  via FetchContent. Header-only, image stack disabled
+  (`TINYGLTF_NO_STB_IMAGE`).
+
+### Changed
+- `AnimationLibrary::ScanFolder` now takes `fps` as a second argument
+  (needed because GLB animations are continuous-time and must be
+  resampled at the configured frame rate when loaded).
+- `LoadedAnimation` is now source-agnostic. New accessors `TotalFrames()`,
+  `TotalPoints()`, `VerticesForFrame()`, `TriangleIndicesPtr()`,
+  `HasTopology()` hide the MDD-vs-GLB distinction from the rest of the
+  codebase. Direct access to `anim.mdd` / `anim.obj` / `anim.glb` is no
+  longer needed in render or timer code.
+- Folder picker title now reads "Select animations folder (.mdd / .glb)".
+
+### Limitations
+- **One mesh, one primitive per GLB.** If the file contains multiple
+  meshes or a mesh with multiple primitives (per-material splits), only
+  the first is loaded; others are ignored.
+- **No morph targets yet.** GLB files exported with shape-key animations
+  but no skin won't render anything animated. Add a skinned variant if
+  this matters; full morph-target support is on the roadmap.
+- **CUBICSPLINE channels degrade to LINEAR.** Common with auto-tangent
+  exports from Blender; visible only on tightly-curved channels.
+- **Files with multiple animations and a non-identity mesh node
+  transform** assume that the mesh node sits at the world origin.
+  Blender's default exports satisfy this; non-default rigs may show
+  scale or offset.
+
+### Known issues
+- Some GLB files (e.g. CesiumMan.glb from the Khronos sample assets)
+  fail to load or render incorrectly. Smaller test models like
+  RiggedSimple and RiggedFigure work fine, so the loader's core path
+  is correct; the failure mode is most likely related to non-identity
+  mesh-node transforms or CUBICSPLINE channels in those specific files.
+  Tracking for v0.5.1.
+- Hot-reload watcher may not pick up new GLB files dropped into the
+  watched folder after the initial scan. Re-selecting the same folder
+  via `Choose folder...` works around this. Tracking for v0.5.1.
+
 ## [0.4.0] — 2026-05-05
 
 Library workflow upgrade. Two specific friction points addressed:
@@ -161,7 +218,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.2.0
