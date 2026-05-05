@@ -26,14 +26,6 @@ struct LoadedAnimation {
   float autoExtent = 1.0f;
 
   // Per-triangle face normals computed from the rest pose (frame 0).
-  // Layout: 3 floats per triangle, same order as `obj->TriangleIndices()`
-  // in groups of 3 indices. Empty if no OBJ is paired.
-  //
-  // We compute normals once on rest pose rather than per-frame because:
-  //   - per-frame is expensive (~1k triangles x 24 fps = constant CPU work)
-  //   - for typical character animation, face orientation drifts only
-  //     mildly over time, so rest-pose normals look fine
-  //   - if shading artefacts ever become a problem we can switch to per-frame
   std::vector<float> restNormals;
 
   double DurationSeconds(double fps) const;
@@ -75,10 +67,33 @@ class AnimationLibrary {
     return 0x01000000 | kRegionColorRgb;
   }
 
-  static constexpr const char* kRegionNamePrefix = "MDD: ";
+  // Region naming.
+  //
+  // Historically all region names were prefixed with "MDD: " (legacy). As
+  // of v0.4.0 the default prefix is empty; users who want it back can set
+  // `region_name_prefix=` in the INI config.
+  //
+  // Prefix is stored as runtime state (static) so that AnimationLibrary
+  // and entry.cpp share a single source of truth without piping it through
+  // every function call. ScanFolder/BuildRegions read the current value;
+  // entry.cpp sets it from config on startup and on Reload config.
+  //
+  // The legacy "MDD: " prefix is recognised on read regardless — see
+  // StripLegacyAndCurrentPrefix() — so old REAPER projects with
+  // `MDD: foo` regions still match basenames after this change.
+  static const char* kLegacyRegionNamePrefix;  // "MDD: "
+  static void SetRegionNamePrefix(const std::string& prefix);
+  static const std::string& RegionNamePrefix();
+
+  // Strip either the current configured prefix or the legacy "MDD: "
+  // prefix from a region name, whichever matches first. Used by entry.cpp
+  // to resolve REAPER region names back to animation basenames.
+  static std::string StripPrefix(const std::string& regionName);
 
  private:
   std::string directory_;
   std::vector<std::unique_ptr<LoadedAnimation>> animations_;
   std::vector<TimelineRegion> regions_;
+
+  static std::string s_regionNamePrefix_;
 };

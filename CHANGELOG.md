@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-05
+
+Library workflow upgrade. Two specific friction points addressed:
+verbose region names, and having to manually re-scan the folder when
+drops new files into it.
+
+### Added
+- **Hot-reload watcher.** A Win32 `ReadDirectoryChangesW` worker thread
+  watches the configured animations folder. When new `.mdd` files appear,
+  events are debounced for ~500ms (so a burst of file copies registers as
+  one batch), the library is rescanned, and the user is prompted via an
+  ImGui modal: *"Found N new animations — place regions for them after
+  the last existing region?"* with `Place all` / `Skip`. Regions are
+  appended after `max(any region.end) + region_gap_seconds` so existing
+  regions (ours or the user's) are never overwritten.
+- New config key `hot_reload.enabled` (default `1`). Set to `0` to
+  disable the watcher; takes effect on `Reload config`.
+- New config key `region_name_prefix` (default empty). Lets the user
+  restore a custom prefix on region names if they want one.
+
+### Changed
+- **Region names no longer carry the `MDD: ` prefix by default.** Fresh
+  `Place regions` produces names like `frog_jump` instead of `MDD: frog_jump`.
+  Old projects with `MDD: foo` regions keep working: `Place regions`,
+  `ReadLiveRegionsFromReaper`, and `DeleteOurRegions` all recognise both
+  the legacy prefix and any currently-configured one.
+- `AnimationLibrary::kRegionNamePrefix` (`constexpr` static) replaced
+  with runtime-mutable static state via `SetRegionNamePrefix()` and
+  `RegionNamePrefix()`. The legacy value `"MDD: "` is exposed as
+  `kLegacyRegionNamePrefix` for compat-matching.
+
+### Notes
+- Hot-reload triggers a full library rescan, which **resets per-animation
+  pose memory** (camera angle, pivot offset, etc.) for animations that
+  were already loaded. This is a known limitation — the pose store keys
+  by index, which is invalidated by rescan. Future work (C-1 in roadmap)
+  will move pose storage into project ext-state and key by basename.
+
 ## [0.3.0] — 2026-04-28
 
 Lit shading, sky background, infinite-feeling ground grid. The viewport
@@ -123,7 +161,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.1.0

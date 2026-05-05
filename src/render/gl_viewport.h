@@ -29,6 +29,12 @@ class GlViewport {
 
     // Per-triangle face normals computed by AnimationLibrary on rest pose.
     const std::vector<float>* restNormals = nullptr;
+
+    // When non-empty, the overlay shows a modal dialog asking the user
+    // whether to place regions for these newly-discovered animations.
+    // entry.cpp populates this from the folder watcher; the user's
+    // response comes back via OverlayRequests.newAnimationsChoice.
+    std::vector<std::string> pendingNewAnimations;
   };
 
   struct OverlayRequests {
@@ -37,6 +43,12 @@ class GlViewport {
     bool placeRegions = false;
     bool openConfig = false;
     bool reloadConfig = false;
+
+    // Choice from the "new animations detected" modal.
+    // 0 = no choice yet (modal still open or never shown).
+    // 1 = "Place all" — append regions for all pending new animations.
+    // 2 = "Skip" — dismiss the modal, leave regions alone.
+    int newAnimationsChoice = 0;
   };
 
   bool Open();
@@ -90,6 +102,9 @@ class GlViewport {
                    std::uint32_t totalFrames,
                    std::size_t vertexCount,
                    const OverlayStatus& status);
+  // Renders the modal dialog inside the current ImGui frame.
+  // Returns: 0 if no choice was made this frame, 1 = Place all, 2 = Skip.
+  int DrawNewAnimationsModal(const std::vector<std::string>& pending);
 
   HWND hwnd_ = nullptr;
   HDC hdc_ = nullptr;

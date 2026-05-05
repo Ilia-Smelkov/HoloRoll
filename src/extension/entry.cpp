@@ -8,6 +8,7 @@
 
 #include "core/animation_library.h"
 #include "core/config_store.h"
+#include "core/folder_watcher.h"
 #include "core/viewport_poses.h"
 #include "extension/folder_picker.h"
 #include "extension/reaper_bridge.h"
@@ -21,11 +22,22 @@ AnimationLibrary g_lib;
 ConfigStore g_config;
 GlViewport g_viewport;
 ViewportPoses g_poses;
+FolderWatcher g_watcher;
 reaper_plugin_info_t* g_rec = nullptr;
 HMODULE g_dllHandle = nullptr;
 
 constexpr std::size_t kNoActiveAnim = std::numeric_limits<std::size_t>::max();
 std::size_t g_activeAnimIdx = kNoActiveAnim;
+
+// Hot-reload state.
+// `g_pendingNewAnimations` is populated by ProcessWatcherEvents() once the
+// watcher's burst of events has settled (see kWatcherDebounceMs). It's read
+// by OnTimer when constructing OverlayStatus, and cleared after the user
+// picks Place all / Skip in the modal.
+std::vector<std::string> g_pendingNewAnimations;
+ULONGLONG g_lastWatcherEventTick = 0;
+bool g_watcherEventsAccumulating = false;
+constexpr ULONGLONG kWatcherDebounceMs = 500;
 
 int g_toggleViewportCommandId = 0;
 int g_chooseFolderCommandId = 0;
@@ -48,6 +60,8 @@ constexpr char kConfigFileName[] = "holoroll_config.ini";
 constexpr char kCfgKeyAnimDir[] = "animations_dir";
 constexpr char kCfgKeyFps[] = "fps";
 constexpr char kCfgKeyGap[] = "region_gap_seconds";
+constexpr char kCfgKeyRegionPrefix[] = "region_name_prefix";
+constexpr char kCfgKeyHotReload[] = "hot_reload.enabled";
 // Scene settings (ground plane). Persisted between sessions.
 constexpr char kCfgKeySceneShowGround[] = "scene.show_ground_plane";
 constexpr char kCfgKeySceneRadius[]     = "scene.ground_radius";
@@ -91,9 +105,25 @@ void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeyFps)) g_config.SetDouble(kCfgKeyFps, kDefaultFps);
   if (!g_config.Has(kCfgKeyGap)) g_config.SetDouble(kCfgKeyGap, kDefaultGapSeconds);
   if (!g_config.Has(kCfgKeyAnimDir)) g_config.SetString(kCfgKeyAnimDir, "");
+  if (!g_config.Has(kCfgKeyRegionPrefix)) g_config.SetString(kCfgKeyRegionPrefix, "");
+  if (!g_config.Has(kCfgKeyHotReload)) g_config.SetDouble(kCfgKeyHotReload, 1.0);
   if (!g_config.Has(kCfgKeySceneShowGround)) g_config.SetDouble(kCfgKeySceneShowGround, 1.0);
   if (!g_config.Has(kCfgKeySceneRadius))     g_config.SetDouble(kCfgKeySceneRadius, 20.0);
   if (!g_config.Has(kCfgKeySceneGridStep))   g_config.SetDouble(kCfgKeySceneGridStep, 1.0);
+}
+
+// Read the configured region-name prefix and apply it to the AnimationLibrary
+// static state. Called on plugin startup and on Reload config.
+//
+// Default is empty (clean basenames). Old projects with "MDD: foo" regions
+// keep working because AnimationLibrary::StripPrefix() always recognises the
+// legacy "MDD: " prefix even when the configured one differs.
+void ApplyRegionPrefixFromConfig() {
+  AnimationLibrary::SetRegionNamePrefix(g_config.GetString(kCfgKeyRegionPrefix, ""));
+}
+
+bool HotReloadEnabled() {
+  return g_config.GetDouble(kCfgKeyHotReload, 1.0) >= 0.5;
 }
 
 // Apply scene settings from config to the viewport. Called on startup and
@@ -147,7 +177,6 @@ std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
   if (!api.enumProjectMarkers3) return out;
 
   const int ourColor = AnimationLibrary::RegionColorReaper();
-  const std::string prefix = AnimationLibrary::kRegionNamePrefix;
 
   int idx = 0;
   while (true) {
@@ -160,12 +189,9 @@ std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
     if (next == 0) break;
     if (isrgn && color == ourColor) {
       const std::string regionName = name ? name : "";
-      std::string basename;
-      if (regionName.rfind(prefix, 0) == 0) {
-        basename = regionName.substr(prefix.size());
-      } else {
-        basename = regionName;
-      }
+      // StripPrefix recognises both the currently-configured prefix and the
+      // legacy "MDD: " prefix, so v0.3.0 projects keep working.
+      const std::string basename = AnimationLibrary::StripPrefix(regionName);
       const std::size_t animIdx = g_lib.FindAnimationIndexByBasename(basename);
       if (animIdx != std::numeric_limits<std::size_t>::max()) {
         TimelineRegion r;
@@ -191,6 +217,18 @@ void RebuildLibraryAndRegions(const std::string& dir) {
 
   g_poses.Clear();
   g_activeAnimIdx = kNoActiveAnim;
+
+  // Restart the watcher on this directory. Stop() is idempotent.
+  // If hot-reload is disabled, we still call Stop to be sure no stale watcher
+  // is running from a previous folder.
+  g_watcher.Stop();
+  g_pendingNewAnimations.clear();
+  g_watcherEventsAccumulating = false;
+  if (HotReloadEnabled() && !dir.empty()) {
+    if (!g_watcher.Start(dir)) {
+      ConsoleLog("[holoroll] FolderWatcher failed to start on: " + dir + "\n");
+    }
+  }
 }
 
 void DeleteOurRegions() {
@@ -198,7 +236,10 @@ void DeleteOurRegions() {
   if (!api.enumProjectMarkers3 || !api.deleteProjectMarker) return;
 
   const int ourColor = AnimationLibrary::RegionColorReaper();
-  const std::string prefix = AnimationLibrary::kRegionNamePrefix;
+  // Recognise legacy-prefixed regions on cleanup too, so re-running
+  // "Place regions" on a v0.3.0 project doesn't accumulate duplicates.
+  const std::string legacyPrefix = AnimationLibrary::kLegacyRegionNamePrefix;
+  const std::string& currentPrefix = AnimationLibrary::RegionNamePrefix();
 
   std::vector<int> toDelete;
   int idx = 0;
@@ -212,8 +253,10 @@ void DeleteOurRegions() {
     if (next == 0) break;
     if (isrgn) {
       const bool colorMatch = (color == ourColor);
-      const bool prefixMatch = name && std::string(name).rfind(prefix, 0) == 0;
-      if (colorMatch || prefixMatch) {
+      const std::string nm = name ? name : "";
+      const bool legacyMatch = nm.rfind(legacyPrefix, 0) == 0;
+      const bool currentMatch = !currentPrefix.empty() && nm.rfind(currentPrefix, 0) == 0;
+      if (colorMatch || legacyMatch || currentMatch) {
         toDelete.push_back(markrgnindexnumber);
       }
     }
@@ -280,6 +323,7 @@ void OpenConfigInEditor() {
 void ReloadConfigFromDisk() {
   g_config.Load(ConfigFilePath());
   EnsureConfigDefaults();
+  ApplyRegionPrefixFromConfig();
   const std::string dir = ResolveAnimationsDir();
   if (!dir.empty() && dir != g_lib.Directory()) {
     RebuildLibraryAndRegions(dir);
@@ -288,6 +332,14 @@ void ReloadConfigFromDisk() {
   }
   // Pick up scene settings the user may have edited in the file.
   if (g_viewport.IsOpen()) ApplySceneSettingsToViewport();
+  // If the user just toggled hot_reload.enabled, restart the watcher to match.
+  if (HotReloadEnabled() && !g_lib.Directory().empty() && !g_watcher.IsRunning()) {
+    g_watcher.Start(g_lib.Directory());
+  } else if (!HotReloadEnabled() && g_watcher.IsRunning()) {
+    g_watcher.Stop();
+    g_pendingNewAnimations.clear();
+    g_watcherEventsAccumulating = false;
+  }
   ConsoleLog("[holoroll] config reloaded.\n");
 }
 
@@ -304,11 +356,137 @@ bool OnMainAction(int command, int flag) {
   return false;
 }
 
+// Drain folder-watcher events, debounce them, and once the burst settles
+// (no new events for kWatcherDebounceMs), rescan the library and pick out
+// genuinely new basenames. Those go into g_pendingNewAnimations; the modal
+// in DrawNewAnimationsModal then asks the user what to do with them.
+//
+// Removed/renamed/modified events are noted in the console log but don't
+// prompt the user — leaving stale regions is the safer default (the user
+// can re-run "Place regions" to clean up).
+void ProcessWatcherEvents() {
+  if (!g_watcher.IsRunning()) return;
+  // If a previous batch is still waiting on user action, don't pile on more.
+  if (!g_pendingNewAnimations.empty()) return;
+
+  auto events = g_watcher.Drain();
+  const ULONGLONG now = GetTickCount64();
+  if (!events.empty()) {
+    g_lastWatcherEventTick = now;
+    g_watcherEventsAccumulating = true;
+  }
+
+  // Wait for the burst to settle before rescanning. Without this, copying
+  // 10 files into the folder would trigger 10 rescans in quick succession.
+  if (!g_watcherEventsAccumulating) return;
+  if (now - g_lastWatcherEventTick < kWatcherDebounceMs) return;
+
+  g_watcherEventsAccumulating = false;
+
+  // Snapshot the current basenames before rescan.
+  std::vector<std::string> previousBasenames;
+  previousBasenames.reserve(g_lib.Count());
+  for (std::size_t i = 0; i < g_lib.Count(); ++i) {
+    previousBasenames.push_back(g_lib.At(i).basename);
+  }
+
+  // Rescan. ScanFolder() rebuilds animations_ from scratch, so we have to
+  // re-issue BuildRegions and clear pose state for any animations that have
+  // disappeared. Existing per-animation pose data is keyed by index, which
+  // is now invalid after rescan — clear all of it. (User-set camera angles
+  // do reset for existing animations on hot-reload; tradeoff for simplicity.
+  // Future: key g_poses by basename instead of index to preserve them.)
+  std::string log;
+  const std::string dir = g_lib.Directory();
+  if (dir.empty()) return;
+  g_lib.ScanFolder(dir, &log);
+  g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
+  if (!log.empty()) ConsoleLog(log);
+
+  g_poses.Clear();
+  g_activeAnimIdx = kNoActiveAnim;
+
+  // Diff: which basenames are new?
+  std::vector<std::string> newBasenames;
+  for (std::size_t i = 0; i < g_lib.Count(); ++i) {
+    const std::string& bn = g_lib.At(i).basename;
+    bool wasPresent = false;
+    for (const auto& prev : previousBasenames) {
+      if (prev == bn) { wasPresent = true; break; }
+    }
+    if (!wasPresent) newBasenames.push_back(bn);
+  }
+
+  if (!newBasenames.empty()) {
+    g_pendingNewAnimations = std::move(newBasenames);
+    ConsoleLog("[holoroll] hot-reload: " + std::to_string(g_pendingNewAnimations.size()) +
+               " new animation(s) detected.\n");
+  } else {
+    ConsoleLog("[holoroll] hot-reload: rescan found no new animations.\n");
+  }
+}
+
+// Append regions for the pending new animations after the latest existing
+// region (whether it's one of ours or not), separated by region_gap_seconds.
+// Existing regions are not touched.
+void PlacePendingNewAnimations() {
+  const auto& api = g_bridge.Api();
+  if (!api.addProjectMarker2) {
+    ConsoleLog("[holoroll] AddProjectMarker2 unavailable; cannot place regions.\n");
+    g_pendingNewAnimations.clear();
+    return;
+  }
+
+  // Find the latest end time among ALL regions in the project (not just
+  // ours), so we don't overlap with the user's other regions.
+  double cursor = 0.0;
+  if (api.enumProjectMarkers3) {
+    int idx = 0;
+    while (true) {
+      bool isrgn = false;
+      double pos = 0.0, rgnend = 0.0;
+      const char* nm = nullptr;
+      int rgnIdx = 0, color = 0;
+      const int next = api.enumProjectMarkers3(nullptr, idx, &isrgn, &pos, &rgnend, &nm, &rgnIdx, &color);
+      if (next == 0) break;
+      if (isrgn && rgnend > cursor) cursor = rgnend;
+      idx = next;
+    }
+  }
+  cursor += GetGap();
+
+  const int ourColor = AnimationLibrary::RegionColorReaper();
+  const double fps = GetFps();
+  const std::string& prefix = AnimationLibrary::RegionNamePrefix();
+
+  std::size_t placed = 0;
+  for (const std::string& basename : g_pendingNewAnimations) {
+    const std::size_t animIdx = g_lib.FindAnimationIndexByBasename(basename);
+    if (animIdx == std::numeric_limits<std::size_t>::max()) continue;
+    const LoadedAnimation& anim = g_lib.At(animIdx);
+    const double duration = anim.DurationSeconds(fps);
+    if (duration <= 0.0) continue;
+
+    const std::string regionName = prefix + basename;
+    api.addProjectMarker2(nullptr, true, cursor, cursor + duration, regionName.c_str(), -1, ourColor);
+    cursor += duration + GetGap();
+    ++placed;
+  }
+
+  ConsoleLog("[holoroll] hot-reload: placed " + std::to_string(placed) + " new region(s).\n");
+  g_pendingNewAnimations.clear();
+}
+
 void OnTimer() {
   g_bridge.OnTimerTick();
   g_viewport.Tick();
 
   if (!g_viewport.IsOpen()) return;
+
+  // Hot-reload: drain folder watcher and (after debounce settles) scan for
+  // newly-added animations. Populates g_pendingNewAnimations on success;
+  // the modal renders once status.pendingNewAnimations is non-empty.
+  ProcessWatcherEvents();
 
   const double timelineTime = g_bridge.TimelineTimeSeconds();
   const std::vector<TimelineRegion> liveRegions = ReadLiveRegionsFromReaper();
@@ -318,6 +496,7 @@ void OnTimer() {
   status.loadedAnimationCount = g_lib.Count();
   status.regionCount = liveRegions.size();
   status.topologyAvailable = true;
+  status.pendingNewAnimations = g_pendingNewAnimations;
 
   static const std::vector<float> kEmptyFloats;
   static const std::vector<std::uint32_t> kEmptyIndices;
@@ -411,6 +590,16 @@ void OnTimer() {
   if (req.placeRegions) PlaceOurRegions();
   if (req.openConfig) OpenConfigInEditor();
   if (req.reloadConfig) ReloadConfigFromDisk();
+
+  // Handle the new-animations modal response.
+  if (req.newAnimationsChoice == 1) {
+    PlacePendingNewAnimations();
+  } else if (req.newAnimationsChoice == 2) {
+    ConsoleLog("[holoroll] hot-reload: user dismissed " +
+               std::to_string(g_pendingNewAnimations.size()) +
+               " pending animation(s).\n");
+    g_pendingNewAnimations.clear();
+  }
 }
 
 bool RegisterAction(reaper_plugin_info_t* rec,
@@ -443,6 +632,8 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
       g_rec->Register("-timer", reinterpret_cast<void*>(OnTimer));
     }
     CloseViewportIfNeeded();
+    g_watcher.Stop();
+    g_pendingNewAnimations.clear();
     g_bridge.Shutdown(g_rec);
     g_lib.Clear();
     g_poses.Clear();
@@ -462,6 +653,7 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
 
   g_config.Load(ConfigFilePath());
   EnsureConfigDefaults();
+  ApplyRegionPrefixFromConfig();
   g_config.Save();
 
   std::string animDir = ResolveAnimationsDir();

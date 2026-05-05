@@ -951,8 +951,70 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   ImGui::TextDisabled("RMB + WASD/QE = fly | wheel = speed | LMB-drag arcs = rotate");
   ImGui::End();
 
+  // "New animations detected" modal. Shown when the folder watcher reports
+  // additions (entry.cpp populates status.pendingNewAnimations). The user's
+  // response is folded into pendingRequests_.newAnimationsChoice so
+  // entry.cpp can act on it after ConsumeRequests() returns.
+  if (!status.pendingNewAnimations.empty()) {
+    const int choice = DrawNewAnimationsModal(status.pendingNewAnimations);
+    if (choice != 0) {
+      pendingRequests_.newAnimationsChoice = choice;
+    }
+  }
+
   ImGui::Render();
   ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+int GlViewport::DrawNewAnimationsModal(const std::vector<std::string>& pending) {
+  // The modal is opened on first frame after `pending` becomes non-empty;
+  // ImGui keeps it open until we pass false. We track that by always calling
+  // OpenPopup whenever pending is non-empty — calling it on an already-open
+  // popup is a no-op.
+  constexpr const char* kPopupId = "New animations detected##holoroll";
+  ImGui::OpenPopup(kPopupId);
+
+  ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+  ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Appearing);
+
+  int choice = 0;
+  if (ImGui::BeginPopupModal(kPopupId, nullptr,
+                              ImGuiWindowFlags_AlwaysAutoResize |
+                              ImGuiWindowFlags_NoSavedSettings)) {
+    ImGui::TextWrapped("Found %d new animation(s) in the watched folder:",
+                       static_cast<int>(pending.size()));
+    ImGui::Spacing();
+
+    // Show the list in a scrollable child if there are many.
+    const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+    const float maxListHeight = lineHeight * 8.0f;
+    const float wantedHeight = std::min(maxListHeight,
+                                        lineHeight * static_cast<float>(pending.size()) + 8.0f);
+    ImGui::BeginChild("##new_animations_list", ImVec2(0, wantedHeight), true,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    for (const auto& name : pending) {
+      ImGui::BulletText("%s", name.c_str());
+    }
+    ImGui::EndChild();
+
+    ImGui::Spacing();
+    ImGui::TextWrapped("Place regions for these after the last existing region?");
+    ImGui::Spacing();
+
+    if (ImGui::Button("Place all", ImVec2(120, 0))) {
+      choice = 1;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Skip", ImVec2(120, 0))) {
+      choice = 2;
+      ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+  }
+  return choice;
 }
 
 void GlViewport::Render(const std::vector<float>& vertices,

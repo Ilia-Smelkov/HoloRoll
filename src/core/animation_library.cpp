@@ -81,7 +81,6 @@ void ComputeRestNormals(LoadedAnimation& anim) {
     const std::uint32_t i1 = indices[t * 3 + 1];
     const std::uint32_t i2 = indices[t * 3 + 2];
 
-    // Bounds-check; if anything is off, leave (0,0,0) and continue.
     if (i0 >= pointCount || i1 >= pointCount || i2 >= pointCount) {
       anim.restNormals[t * 3 + 0] = 0.0f;
       anim.restNormals[t * 3 + 1] = 1.0f;
@@ -99,11 +98,9 @@ void ComputeRestNormals(LoadedAnimation& anim) {
     const float cy = positions[i2 * 3 + 1];
     const float cz = positions[i2 * 3 + 2];
 
-    // Edge vectors
     const float e1x = bx - ax, e1y = by - ay, e1z = bz - az;
     const float e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
 
-    // Cross product e1 x e2 (counter-clockwise = outward-facing assumption)
     float nx = e1y * e2z - e1z * e2y;
     float ny = e1z * e2x - e1x * e2z;
     float nz = e1x * e2y - e1y * e2x;
@@ -112,7 +109,7 @@ void ComputeRestNormals(LoadedAnimation& anim) {
     if (len > 1e-8f) {
       nx /= len; ny /= len; nz /= len;
     } else {
-      nx = 0.0f; ny = 1.0f; nz = 0.0f;  // degenerate triangle -> arbitrary
+      nx = 0.0f; ny = 1.0f; nz = 0.0f;
     }
     anim.restNormals[t * 3 + 0] = nx;
     anim.restNormals[t * 3 + 1] = ny;
@@ -121,10 +118,50 @@ void ComputeRestNormals(LoadedAnimation& anim) {
 }
 }  // namespace
 
+// ---- Static state -----------------------------------------------------------
+
+// Default: empty prefix (v0.4.0+). Set via SetRegionNamePrefix() from
+// entry.cpp on startup based on the `region_name_prefix` config key.
+std::string AnimationLibrary::s_regionNamePrefix_;
+
+const char* AnimationLibrary::kLegacyRegionNamePrefix = "MDD: ";
+
+void AnimationLibrary::SetRegionNamePrefix(const std::string& prefix) {
+  s_regionNamePrefix_ = prefix;
+}
+
+const std::string& AnimationLibrary::RegionNamePrefix() {
+  return s_regionNamePrefix_;
+}
+
+std::string AnimationLibrary::StripPrefix(const std::string& regionName) {
+  // Try the currently-configured prefix first (it could be empty).
+  if (!s_regionNamePrefix_.empty() &&
+      regionName.size() >= s_regionNamePrefix_.size() &&
+      regionName.compare(0, s_regionNamePrefix_.size(), s_regionNamePrefix_) == 0) {
+    return regionName.substr(s_regionNamePrefix_.size());
+  }
+
+  // Legacy prefix: regions written by v0.3.0 and earlier always carry "MDD: ".
+  // Recognise them on read so old projects keep working after the user
+  // upgrades to v0.4.0.
+  const std::string legacy = kLegacyRegionNamePrefix;
+  if (regionName.size() >= legacy.size() &&
+      regionName.compare(0, legacy.size(), legacy) == 0) {
+    return regionName.substr(legacy.size());
+  }
+
+  return regionName;
+}
+
+// ---- LoadedAnimation --------------------------------------------------------
+
 double LoadedAnimation::DurationSeconds(double fps) const {
   if (!mdd || !mdd->IsLoaded() || fps <= 0.0) return 0.0;
   return static_cast<double>(mdd->TotalFrames()) / fps;
 }
+
+// ---- AnimationLibrary -------------------------------------------------------
 
 void AnimationLibrary::Clear() {
   animations_.clear();
@@ -251,7 +288,7 @@ void AnimationLibrary::BuildRegions(double fps, double gapSeconds, double startS
     r.animationIndex = i;
     r.startSeconds = cursor;
     r.endSeconds = cursor + duration;
-    r.regionName = std::string(kRegionNamePrefix) + animations_[i]->basename;
+    r.regionName = s_regionNamePrefix_ + animations_[i]->basename;
     regions_.push_back(r);
     cursor = r.endSeconds + gapSeconds;
   }

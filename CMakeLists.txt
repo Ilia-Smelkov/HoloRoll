@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(reaper_holoroll VERSION 0.3.0 LANGUAGES CXX)
+project(reaper_holoroll VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,6 +35,7 @@ add_library(reaper_holoroll SHARED
   src/core/obj_index_loader.cpp
   src/core/animation_library.cpp
   src/core/config_store.cpp
+  src/core/folder_watcher.cpp
   src/render/gl_viewport.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
