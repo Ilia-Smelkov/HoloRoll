@@ -47,6 +47,19 @@ using GetMediaItemTakeFn = MediaItem_Take* (*)(MediaItem* item, int takeidx);
 using GetActiveTakeFn = MediaItem_Take* (*)(MediaItem* item);
 using GetSetMediaItemInfo_StringFn = bool (*)(MediaItem* item, const char* parmname, char* stringNeedBig, bool setNewValue);
 
+// ---- Project APIs (v0.7.0 project-relative animations folder) -------------
+//
+// EnumProjects(idx, path, sz): returns the ReaProject at idx (-1 = current);
+// fills `path` with the .rpp file path for that project, or empty if the
+// project hasn't been saved yet (Untitled project).
+using EnumProjectsFn = ReaProject* (*)(int idx, char* projfn, int projfn_sz);
+
+// SetProjExtState/GetProjExtState: per-project key-value strings, persisted
+// inside the .rpp on save. We use this to remember a folder override for
+// projects whose user pointed Choose folder... at a non-default path.
+using SetProjExtStateFn = int (*)(ReaProject* proj, const char* extname, const char* key, const char* value);
+using GetProjExtStateFn = int (*)(ReaProject* proj, const char* extname, const char* key, char* valOutNeedBig, int valOutNeedBig_sz);
+
 struct ReaperApi {
   GetPlayPositionFn getPlayPosition = nullptr;
   GetPlayStateFn getPlayState = nullptr;
@@ -80,6 +93,11 @@ struct ReaperApi {
   GetMediaItemTakeFn getMediaItemTake = nullptr;
   GetActiveTakeFn getActiveTake = nullptr;
   GetSetMediaItemInfo_StringFn getSetMediaItemInfo_String = nullptr;
+
+  // Project introspection (v0.7.0 project-relative folders).
+  EnumProjectsFn enumProjects = nullptr;
+  SetProjExtStateFn setProjExtState = nullptr;
+  GetProjExtStateFn getProjExtState = nullptr;
 };
 
 bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api);

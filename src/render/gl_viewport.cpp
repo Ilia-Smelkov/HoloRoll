@@ -6,6 +6,7 @@
 #include <cstring>
 #include <gl/GL.h>
 
+#include "extension/drop_target.h"
 #include "imgui.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "backends/imgui_impl_win32.h"
@@ -127,6 +128,11 @@ bool ImGuiOwnsMouse() {
 
 constexpr int kGizmoAxisToRing[3] = {0, 1, 2};
 constexpr float kLightDir[3] = {0.4f, 0.85f, 0.35f};
+
+// Forward decl: defined further down, near GlViewport::Render where the
+// other rendering helpers live. Both DrawOverlay and Render call it; this
+// forward decl lets DrawOverlay see it without reordering the file.
+void DrawDropOverlayImGui(const drop_target::DragState& state);
 }  // namespace
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -866,21 +872,33 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   ImGui::Begin("HoloRoll", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
   if (ImGui::CollapsingHeader("Library", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::TextWrapped("Folder: %s", status.animationsDir.empty() ? "(not set)" : status.animationsDir.c_str());
-    ImGui::Text("Loaded: %u animation(s), %u item(s) on timeline",
-                static_cast<unsigned>(status.loadedAnimationCount),
-                static_cast<unsigned>(status.regionCount));
-    ImGui::Text("Active: %s", status.currentAnimation.empty() ? "(none)" : status.currentAnimation.c_str());
-    if (status.activeRegionEnd > status.activeRegionStart) {
-      ImGui::Text("Item time: %.3fs .. %.3fs", status.activeRegionStart, status.activeRegionEnd);
-    }
+    if (status.projectUntitled) {
+      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                         "Save the REAPER project to enable HoloRoll.");
+      ImGui::TextWrapped("HoloRoll uses a project-relative folder "
+                         "(<project>/Animations/) to know where animations live. "
+                         "Until you save the project, there is no place to look.");
+    } else {
+      ImGui::TextWrapped("Folder: %s", status.animationsDir.empty() ? "(not set)" : status.animationsDir.c_str());
+      if (status.folderIsOverride) {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f),
+                           "(override - not the project default)");
+      }
+      ImGui::Text("Loaded: %u animation(s), %u item(s) on timeline",
+                  static_cast<unsigned>(status.loadedAnimationCount),
+                  static_cast<unsigned>(status.regionCount));
+      ImGui::Text("Active: %s", status.currentAnimation.empty() ? "(none)" : status.currentAnimation.c_str());
+      if (status.activeRegionEnd > status.activeRegionStart) {
+        ImGui::Text("Item time: %.3fs .. %.3fs", status.activeRegionStart, status.activeRegionEnd);
+      }
 
-    // Warning: an item is under the playhead but its name does not match any
-    // animation in the current library. Shows in red so it's hard to miss.
-    if (!status.missingAnimationName.empty()) {
-      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
-                         "⚠ Animation '%s' not found",
-                         status.missingAnimationName.c_str());
+      // Warning: an item is under the playhead but its name does not match any
+      // animation in the current library. Shows in red so it's hard to miss.
+      if (!status.missingAnimationName.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
+                           "⚠ Animation '%s' not found",
+                           status.missingAnimationName.c_str());
+      }
     }
 
     if (ImGui::Button("Choose folder...")) pendingRequests_.chooseFolder = true;
@@ -888,6 +906,12 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     if (ImGui::Button("Reload folder")) pendingRequests_.reloadFolder = true;
     ImGui::SameLine();
     if (ImGui::Button("Place all")) pendingRequests_.placeRegions = true;
+
+    // "Reset to default folder" only shows when an override is active — it
+    // would be a no-op confusion otherwise.
+    if (status.folderIsOverride) {
+      if (ImGui::Button("Reset to default folder")) pendingRequests_.resetFolderOverride = true;
+    }
 
     // v0.6.0 SPIKE: validates we can create empty named items via REAPER API.
     // Will be removed (or repurposed) once the items workflow lands.
@@ -977,6 +1001,11 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     }
   }
 
+  // Drop-zone visual feedback. Drawn last so it goes on top of the
+  // overlay, the modal, and the 3D scene. Cheap when no drag is active
+  // (just an atomic load + an if).
+  DrawDropOverlayImGui(drop_target::GetDragState());
+
   ImGui::Render();
   ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
@@ -1032,6 +1061,83 @@ int GlViewport::DrawNewAnimationsModal(const std::vector<std::string>& pending) 
   return choice;
 }
 
+// Render the drag-n-drop visual feedback over everything else. Called
+// from inside the active ImGui frame (so the resulting draw commands
+// land on top of the regular overlay/3D scene) but before ImGui::Render.
+//
+// Three states drive the visual:
+//   - valid + host accepts          → green, "Drop here to add to project"
+//   - valid + host rejects (Untitled) → amber, "Save the REAPER project first"
+//   - not valid (wrong extensions)  → red,   "Unsupported file type"
+//
+// The overlay consists of three layers, drawn into ImGui's foreground draw
+// list so they sit above any window:
+//   1. A 35% black fullscreen rectangle (dims the scene/UI underneath)
+//   2. An 8-pixel coloured border around the viewport
+//   3. A centered text plate with the per-state message
+//
+// Defined inside the anonymous namespace at the top of the file (forward-
+// declared there so DrawOverlay can call it). Linkage matches the
+// declaration: internal, namespace-scoped, no `static` needed.
+namespace {
+void DrawDropOverlayImGui(const drop_target::DragState& state) {
+  if (!state.isDragging) return;
+
+  // Pick colours and message based on state.
+  ImU32 borderColor;
+  ImU32 plateColor;
+  ImU32 textColor;
+  const char* message;
+  if (state.hasValidFiles && state.hostAccepts) {
+    borderColor = IM_COL32(70, 220, 110, 255);   // green
+    plateColor  = IM_COL32(20, 50, 30, 235);
+    textColor   = IM_COL32(220, 255, 230, 255);
+    message     = "Drop here to add to project";
+  } else if (state.hasValidFiles && !state.hostAccepts) {
+    borderColor = IM_COL32(240, 180, 50, 255);   // amber
+    plateColor  = IM_COL32(60, 40, 10, 235);
+    textColor   = IM_COL32(255, 230, 180, 255);
+    message     = "Save the REAPER project first";
+  } else {
+    borderColor = IM_COL32(220, 80, 80, 255);    // red
+    plateColor  = IM_COL32(60, 20, 20, 235);
+    textColor   = IM_COL32(255, 220, 220, 255);
+    message     = "Unsupported file type";
+  }
+
+  ImDrawList* draw = ImGui::GetForegroundDrawList();
+  const ImVec2 size = ImGui::GetIO().DisplaySize;
+
+  // Layer 1: dim the scene underneath.
+  draw->AddRectFilled(ImVec2(0, 0), size, IM_COL32(0, 0, 0, 90));
+
+  // Layer 2: thick border. Drawn as 4 filled rects rather than AddRect's
+  // line so the corners are clean and the thickness is exact.
+  constexpr float kBorder = 8.0f;
+  draw->AddRectFilled(ImVec2(0, 0),                ImVec2(size.x, kBorder),         borderColor);
+  draw->AddRectFilled(ImVec2(0, size.y - kBorder), ImVec2(size.x, size.y),          borderColor);
+  draw->AddRectFilled(ImVec2(0, 0),                ImVec2(kBorder, size.y),         borderColor);
+  draw->AddRectFilled(ImVec2(size.x - kBorder, 0), ImVec2(size.x, size.y),          borderColor);
+
+  // Layer 3: centered text plate. Sized to the message with generous padding;
+  // never wider than 80% of the viewport so very narrow docks still look OK.
+  const ImVec2 textSize = ImGui::CalcTextSize(message);
+  const float plateW = std::min(size.x * 0.8f, textSize.x + 64.0f);
+  const float plateH = textSize.y + 32.0f;
+  const ImVec2 plateMin(size.x * 0.5f - plateW * 0.5f,
+                        size.y * 0.5f - plateH * 0.5f);
+  const ImVec2 plateMax(plateMin.x + plateW, plateMin.y + plateH);
+  draw->AddRectFilled(plateMin, plateMax, plateColor, 6.0f);
+  draw->AddRect(plateMin, plateMax, borderColor, 6.0f, 0, 2.0f);
+
+  // Center the text inside the plate (use measured size rather than
+  // re-calling CalcTextSize for the same string).
+  const ImVec2 textPos(plateMin.x + (plateW - textSize.x) * 0.5f,
+                       plateMin.y + (plateH - textSize.y) * 0.5f);
+  draw->AddText(textPos, textColor, message);
+}
+}  // namespace
+
 void GlViewport::Render(const std::vector<float>& vertices,
                         const std::vector<std::uint32_t>& triangleIndices,
                         double playPositionSeconds,
@@ -1052,6 +1158,50 @@ void GlViewport::Render(const std::vector<float>& vertices,
   GetClientRect(hwnd_, &rc);
   viewportWidth_ = (rc.right - rc.left) > 0 ? (rc.right - rc.left) : 1;
   viewportHeight_ = (rc.bottom - rc.top) > 0 ? (rc.bottom - rc.top) : 1;
+
+  // v0.8.0: Untitled-project early-out. Skip the 3D scene, gizmo, overlay,
+  // background gradient, ground plane — everything except a single centered
+  // message. The dock window is otherwise idle / empty so the user knows
+  // the plugin is intentionally inactive, not broken.
+  if (status.projectUntitled) {
+    glViewport(0, 0, viewportWidth_, viewportHeight_);
+    glClearColor(0.10f, 0.10f, 0.12f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    if (imguiInitialized_) {
+      ImGui_ImplOpenGL3_NewFrame();
+      ImGui_ImplWin32_NewFrame();
+      ImGui::NewFrame();
+
+      const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+      const char* msg = "Save the REAPER project to enable HoloRoll";
+      const ImVec2 textSize = ImGui::CalcTextSize(msg);
+      ImGui::SetNextWindowPos(ImVec2((displaySize.x - textSize.x) * 0.5f - 16.0f,
+                                     (displaySize.y - textSize.y) * 0.5f - 8.0f));
+      ImGui::SetNextWindowBgAlpha(0.0f);
+      ImGui::Begin("##holoroll_untitled", nullptr,
+                   ImGuiWindowFlags_NoTitleBar |
+                   ImGuiWindowFlags_NoResize |
+                   ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoScrollbar |
+                   ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_NoInputs |
+                   ImGuiWindowFlags_AlwaysAutoResize);
+      ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "%s", msg);
+      ImGui::End();
+
+      // Drop-zone visual feedback (drawn even in Untitled state because
+      // we register the drop target whenever the viewport is open).
+      DrawDropOverlayImGui(drop_target::GetDragState());
+
+      ImGui::Render();
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
+
+    SwapBuffers(hdc_);
+    return;
+  }
+
   const float aspect = static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_);
   const float fovYDeg = 55.0f;
   const float nearZ = 0.01f;

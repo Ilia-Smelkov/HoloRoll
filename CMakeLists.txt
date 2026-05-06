@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(reaper_holoroll VERSION 0.6.0 LANGUAGES CXX)
+project(reaper_holoroll VERSION 0.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,7 @@ add_library(reaper_holoroll SHARED
   src/extension/entry.cpp
   src/extension/reaper_bridge.cpp
   src/extension/folder_picker.cpp
+  src/extension/drop_target.cpp
   src/core/mdd_data_manager.cpp
   src/core/obj_index_loader.cpp
   src/core/animation_library.cpp
@@ -81,6 +82,7 @@ target_link_libraries(reaper_holoroll PRIVATE
   comdlg32
   shell32
   ole32
+  oleaut32
 )
 
 if(MSVC)

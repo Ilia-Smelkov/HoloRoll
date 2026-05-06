@@ -11,6 +11,7 @@
 #include "core/config_store.h"
 #include "core/folder_watcher.h"
 #include "core/viewport_poses.h"
+#include "extension/drop_target.h"
 #include "extension/folder_picker.h"
 #include "extension/reaper_bridge.h"
 #include "render/gl_viewport.h"
@@ -23,7 +24,8 @@ AnimationLibrary g_lib;
 ConfigStore g_config;
 GlViewport g_viewport;
 ViewportPoses g_poses;
-FolderWatcher g_watcher;
+FolderWatcher g_watcher;          // Watches the active project's Animations/.
+FolderWatcher g_incomingWatcher;  // Watches the global Incoming/ folder.
 reaper_plugin_info_t* g_rec = nullptr;
 HMODULE g_dllHandle = nullptr;
 
@@ -38,6 +40,12 @@ std::size_t g_activeAnimIdx = kNoActiveAnim;
 std::vector<std::string> g_pendingNewAnimations;
 ULONGLONG g_lastWatcherEventTick = 0;
 bool g_watcherEventsAccumulating = false;
+
+// Same shape but for g_incomingWatcher — separate state because the
+// incoming folder operates independently of the project folder.
+ULONGLONG g_lastIncomingEventTick = 0;
+bool g_incomingEventsAccumulating = false;
+
 constexpr ULONGLONG kWatcherDebounceMs = 500;
 
 int g_toggleViewportCommandId = 0;
@@ -55,10 +63,10 @@ constexpr double kDefaultFps = 24.0;
 constexpr double kDefaultGapSeconds = 1.0;
 
 constexpr char kExtStateSection[] = "holoroll";
-constexpr char kExtStateAnimDir[] = "animations_dir";
+// Project ext-state keys (saved inside .rpp via SetProjExtState).
+constexpr char kProjExtStateAnimDirOverride[] = "animations_dir_override";
 constexpr char kConfigFileName[] = "holoroll_config.ini";
 
-constexpr char kCfgKeyAnimDir[] = "animations_dir";
 constexpr char kCfgKeyFps[] = "fps";
 constexpr char kCfgKeyGap[] = "region_gap_seconds";
 constexpr char kCfgKeyRegionPrefix[] = "region_name_prefix";
@@ -67,6 +75,17 @@ constexpr char kCfgKeyHotReload[] = "hot_reload.enabled";
 constexpr char kCfgKeySceneShowGround[] = "scene.show_ground_plane";
 constexpr char kCfgKeySceneRadius[]     = "scene.ground_radius";
 constexpr char kCfgKeySceneGridStep[]   = "scene.grid_step";
+
+// Default subfolder name for project-relative animations storage. Convention
+// matches game-industry layouts (Animations/ alongside Audio/, Materials/,
+// etc.). Created automatically when a saved project is opened.
+constexpr char kProjectAnimationsSubdir[] = "Animations";
+
+// Global "incoming" folder where engine bridges, scripts, or the user can
+// drop new animation files. Files appearing here are auto-moved into the
+// active project's Animations/ folder on next OnTimer tick. Path is
+// %APPDATA%\REAPER\UserPlugins\HoloRollIncoming — i.e. next to the DLL.
+constexpr char kIncomingSubdir[] = "HoloRollIncoming";
 
 constexpr char kToggleViewportCommandName[] = "MDDVIEWPORT_TOGGLE";
 constexpr char kToggleViewportActionDesc[] = "HoloRoll: Toggle Viewport";
@@ -113,7 +132,6 @@ void SpikeLog(const std::string& msg) {
 void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeyFps)) g_config.SetDouble(kCfgKeyFps, kDefaultFps);
   if (!g_config.Has(kCfgKeyGap)) g_config.SetDouble(kCfgKeyGap, kDefaultGapSeconds);
-  if (!g_config.Has(kCfgKeyAnimDir)) g_config.SetString(kCfgKeyAnimDir, "");
   if (!g_config.Has(kCfgKeyRegionPrefix)) g_config.SetString(kCfgKeyRegionPrefix, "");
   if (!g_config.Has(kCfgKeyHotReload)) g_config.SetDouble(kCfgKeyHotReload, 1.0);
   if (!g_config.Has(kCfgKeySceneShowGround)) g_config.SetDouble(kCfgKeySceneShowGround, 1.0);
@@ -157,28 +175,264 @@ void PersistSceneSettingsFromViewport() {
   g_config.Save();
 }
 
-std::string ResolveAnimationsDir() {
-  const std::string fromCfg = g_config.GetString(kCfgKeyAnimDir, "");
-  if (!fromCfg.empty()) return fromCfg;
-  if (g_bridge.Api().getExtState && g_bridge.Api().hasExtState) {
-    if (g_bridge.Api().hasExtState(kExtStateSection, kExtStateAnimDir)) {
-      const char* value = g_bridge.Api().getExtState(kExtStateSection, kExtStateAnimDir);
-      if (value && *value) return value;
-    }
-  }
+double GetFps() { return g_config.GetDouble(kCfgKeyFps, kDefaultFps); }
+double GetGap() { return g_config.GetDouble(kCfgKeyGap, kDefaultGapSeconds); }
+
+// ---- v0.7.0 project-relative animations folder -----------------------------
+//
+// The active animations folder is now resolved per REAPER project, not
+// per global config. Resolution order on every OnTimer tick:
+//
+//   1. If active project has an override saved in its ext-state, use that.
+//   2. Else if active project is saved (has a .rpp path on disk), use
+//      <project_dir>/Animations/. Auto-created on first sight.
+//   3. Else (Untitled, never saved) - no active folder. Viewport shows hint.
+//
+// `g_currentProjectPath` caches the .rpp path we last saw; OnTimer compares
+// it to the current EnumProjects(-1) value and triggers OnProjectChanged()
+// when it differs. This handles Open / Save As / Switch Project / Close All.
+//
+// Initialised to a sentinel value that no real path would equal, so the
+// very first OnTimer comparison always fires OnProjectChanged() and
+// performs the initial library scan — even if the active project is
+// Untitled (real path "").
+std::string g_currentProjectPath = "\x01HOLOROLL_UNINIT";
+std::string g_currentAnimationsFolder;  // Resolved active folder, or empty.
+
+// Read the .rpp path of REAPER's currently-active project. Returns empty
+// string if the project is Untitled or the API is unavailable.
+std::string GetActiveProjectPath() {
+  const auto& api = g_bridge.Api();
+  if (!api.enumProjects) return {};
+  char buf[4096] = {};
+  api.enumProjects(-1, buf, sizeof(buf));
+  return std::string(buf);
+}
+
+// Strip the file portion of `\path\to\project.rpp` -> `\path\to`. Returns
+// empty string if there's no separator (e.g. just a filename).
+std::string DirOfPath(const std::string& fullPath) {
+  const auto pos = fullPath.find_last_of("\\/");
+  return pos == std::string::npos ? std::string{} : fullPath.substr(0, pos);
+}
+
+// Read project-level override for animations folder. Returns empty if no
+// override is set on the active project.
+std::string GetProjectAnimationsOverride() {
+  const auto& api = g_bridge.Api();
+  if (!api.getProjExtState) return {};
+  char buf[4096] = {};
+  // Per REAPER docs: nullptr ReaProject* means the active project. Return
+  // value > 0 means the key existed.
+  const int rv = api.getProjExtState(nullptr, kExtStateSection,
+                                     kProjExtStateAnimDirOverride,
+                                     buf, sizeof(buf));
+  if (rv > 0 && buf[0] != '\0') return std::string(buf);
   return {};
 }
 
-void PersistAnimationsDir(const std::string& dir) {
-  g_config.SetString(kCfgKeyAnimDir, dir);
-  g_config.Save();
-  if (g_bridge.Api().setExtState) {
-    g_bridge.Api().setExtState(kExtStateSection, kExtStateAnimDir, dir.c_str(), true);
-  }
+// Write project-level override for animations folder. Pass empty string to
+// clear the override (returns the project to default <project>/Animations/).
+void SetProjectAnimationsOverride(const std::string& dir) {
+  const auto& api = g_bridge.Api();
+  if (!api.setProjExtState) return;
+  api.setProjExtState(nullptr, kExtStateSection,
+                      kProjExtStateAnimDirOverride, dir.c_str());
 }
 
-double GetFps() { return g_config.GetDouble(kCfgKeyFps, kDefaultFps); }
-double GetGap() { return g_config.GetDouble(kCfgKeyGap, kDefaultGapSeconds); }
+// Recursive Win32 directory creation. Returns true if the directory exists
+// after the call (already existed or was newly created).
+bool EnsureFolderExists(const std::string& path) {
+  if (path.empty()) return false;
+  const DWORD attr = GetFileAttributesA(path.c_str());
+  if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) return true;
+
+  // CreateDirectoryA fails if a parent doesn't exist; recurse up first.
+  const std::string parent = DirOfPath(path);
+  if (!parent.empty() && parent != path) {
+    if (!EnsureFolderExists(parent)) return false;
+  }
+  return CreateDirectoryA(path.c_str(), nullptr) != 0 ||
+         GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+// Resolve the animations folder for the current project state. Returns
+// empty string if no folder is currently usable (Untitled project).
+std::string ResolveActiveAnimationsFolder() {
+  // Override always wins, even if the project hasn't been saved yet (the
+  // user explicitly pointed Choose folder... somewhere).
+  const std::string override = GetProjectAnimationsOverride();
+  if (!override.empty()) return override;
+
+  const std::string proj = GetActiveProjectPath();
+  if (proj.empty()) return {};  // Untitled project, no default available.
+
+  const std::string projDir = DirOfPath(proj);
+  if (projDir.empty()) return {};
+  return projDir + "\\" + kProjectAnimationsSubdir;
+}
+
+// ---- v0.8.0 Incoming folder + auto-move ----------------------------------
+//
+// Resolve the path to the global Incoming folder. Sits next to the DLL in
+// %APPDATA%\REAPER\UserPlugins\HoloRollIncoming. Created on plugin startup.
+// This folder is independent of any project; it's where engine bridges,
+// scripts, or the user can drop files for HoloRoll to pick up.
+std::string GetIncomingFolder() {
+  const std::string base = DirOfModule(g_dllHandle);
+  if (base.empty()) return {};
+  return base + "\\" + kIncomingSubdir;
+}
+
+// Lowercase extension of a file name (".glb", ".mdd", ".obj", or "").
+std::string LowerExtOf(const std::string& path) {
+  const auto dot = path.find_last_of('.');
+  if (dot == std::string::npos) return {};
+  std::string ext = path.substr(dot);
+  for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return ext;
+}
+
+// Stem of a file name without extension. "foo/bar.glb" -> "bar".
+std::string StemOf(const std::string& path) {
+  const auto slash = path.find_last_of("\\/");
+  const std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
+  const auto dot = base.find_last_of('.');
+  return (dot == std::string::npos) ? base : base.substr(0, dot);
+}
+
+bool FileExistsOnDisk(const std::string& path) {
+  const DWORD attr = GetFileAttributesA(path.c_str());
+  return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+// Find a non-colliding destination path. If `<destDir>\<stem><ext>` doesn't
+// exist, return that. Otherwise try `<destDir>\<stem>_2<ext>`, `_3`, etc.
+// Caps at 999 attempts (defensive; collisions deeper than that mean
+// something is very wrong and we'd rather fail than spin).
+std::string GenerateUniqueDestPath(const std::string& destDir,
+                                   const std::string& stem,
+                                   const std::string& ext) {
+  std::string candidate = destDir + "\\" + stem + ext;
+  if (!FileExistsOnDisk(candidate)) return candidate;
+  for (int i = 2; i < 1000; ++i) {
+    candidate = destDir + "\\" + stem + "_" + std::to_string(i) + ext;
+    if (!FileExistsOnDisk(candidate)) return candidate;
+  }
+  return {};  // Truly out of options.
+}
+
+// Move `src` to a non-colliding path under `destDir`. Returns the resulting
+// destination path on success, or empty string on failure. Collisions are
+// resolved by appending _<N> suffix to the stem (which then becomes a
+// natural variation — ResolveAnimationByItemName strips the suffix during
+// playback resolution, so the user gets two items playing the same
+// animation with potentially different sounds on top).
+std::string MoveFileWithCollisionRename(const std::string& src,
+                                        const std::string& destDir) {
+  if (!EnsureFolderExists(destDir)) return {};
+  const std::string stem = StemOf(src);
+  const std::string ext = LowerExtOf(src);
+  const std::string dest = GenerateUniqueDestPath(destDir, stem, ext);
+  if (dest.empty()) return {};
+
+  // MoveFileExA without REPLACE_EXISTING: we already chose a non-colliding
+  // path. COPY_ALLOWED handles cross-disk moves (e.g. Incoming on C:,
+  // project on D:). The OS does copy+delete in that case, which is not
+  // atomic but acceptable for our use — watcher debounce hides the gap.
+  if (!MoveFileExA(src.c_str(), dest.c_str(),
+                   MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
+    return {};
+  }
+  return dest;
+}
+
+// Drain the Incoming folder of any animation files, moving them into the
+// active project's Animations/ folder. Called when the project changes
+// (e.g. Untitled -> saved) and any time we rebuild the library, so files
+// that arrived while the user had no saved project get picked up.
+std::size_t DrainIncomingToProject() {
+  const std::string incoming = GetIncomingFolder();
+  const std::string projAnims = ResolveActiveAnimationsFolder();
+  if (incoming.empty() || projAnims.empty()) return 0;
+  if (incoming == projAnims) return 0;  // Defensive: never move into self.
+
+  WIN32_FIND_DATAA fd{};
+  const std::string pattern = incoming + "\\*.*";
+  HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+
+  std::size_t moved = 0;
+  std::vector<std::string> filesToMove;
+  do {
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    const std::string name = fd.cFileName;
+    const std::string ext = LowerExtOf(name);
+    // Only move files we actually understand. .obj is paired with .mdd so
+    // it's also legitimate (artists may drop both at once).
+    if (ext != ".mdd" && ext != ".glb" && ext != ".obj") continue;
+    filesToMove.push_back(incoming + "\\" + name);
+  } while (FindNextFileA(h, &fd));
+  FindClose(h);
+
+  for (const std::string& src : filesToMove) {
+    const std::string dest = MoveFileWithCollisionRename(src, projAnims);
+    if (!dest.empty()) {
+      ++moved;
+      ConsoleLog("[holoroll] moved " + src + " -> " + dest + "\n");
+    } else {
+      ConsoleLog("[holoroll] FAILED to move " + src +
+                 " (GetLastError=" + std::to_string(GetLastError()) + ")\n");
+    }
+  }
+  return moved;
+}
+
+// Callback for the OLE drop target attached to our viewport window. Called
+// on the main thread when the user drops files from Windows Explorer onto
+// the HoloRoll viewport. We move the files into the active project's
+// Animations/ folder — the project-folder watcher then picks them up via
+// the regular hot-reload path (modal -> place items at cursor).
+//
+// Untitled projects can't accept drops (there's no project folder to put
+// them in). We log a single-line message instead of crashing or showing a
+// modal; the Untitled overlay already says "Save the REAPER project".
+void OnViewportFilesDropped(const std::vector<std::string>& paths) {
+  if (paths.empty()) return;
+
+  const std::string projAnims = ResolveActiveAnimationsFolder();
+  if (projAnims.empty()) {
+    SpikeLog("[holoroll] drop ignored: save the REAPER project first.\n");
+    return;
+  }
+
+  std::size_t moved = 0;
+  for (const std::string& src : paths) {
+    // The user might have dragged a file that's ALREADY inside the
+    // project's Animations/ (rare, but Win32 doesn't prevent it). In
+    // that case skip silently — nothing to move.
+    const std::string srcDir = DirOfPath(src);
+    if (_stricmp(srcDir.c_str(), projAnims.c_str()) == 0) continue;
+
+    const std::string dest = MoveFileWithCollisionRename(src, projAnims);
+    if (!dest.empty()) {
+      ++moved;
+      ConsoleLog("[holoroll] drop: moved " + src + " -> " + dest + "\n");
+    } else {
+      // Move failed. Most common reason: source is on a network drive or
+      // user lacks delete permission. Fall back to copy in that case.
+      // We don't auto-copy silently though — the user explicitly dragged,
+      // and "why is the original still there" is a worse UX than a log line.
+      const DWORD err = GetLastError();
+      SpikeLog("[holoroll] drop: FAILED to move " + src +
+               " (GetLastError=" + std::to_string(err) + ")\n");
+    }
+  }
+
+  if (moved > 0) {
+    ConsoleLog("[holoroll] drop: " + std::to_string(moved) + " file(s) moved.\n");
+  }
+}
 
 std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
   std::vector<TimelineRegion> out;
@@ -216,7 +470,37 @@ std::vector<TimelineRegion> ReadLiveRegionsFromReaper() {
   return out;
 }
 
-void RebuildLibraryAndRegions(const std::string& dir) {
+// Refresh the library + regions from the currently-active animations folder.
+// `dir` is passed only for compatibility with existing callers; the actual
+// folder used is whatever ResolveActiveAnimationsFolder() returns now. If
+// no folder is active (Untitled), this becomes a no-op clear.
+void RebuildLibraryAndRegions(const std::string& /*ignored*/) {
+  const std::string dir = ResolveActiveAnimationsFolder();
+  g_currentAnimationsFolder = dir;
+
+  // Restart watcher even if folder is empty (Stop is idempotent).
+  g_watcher.Stop();
+  g_pendingNewAnimations.clear();
+  g_watcherEventsAccumulating = false;
+
+  if (dir.empty()) {
+    // No active project, nothing to scan. Clear the library so we don't
+    // keep showing stale animations from the previous project.
+    g_lib.Clear();
+    g_poses.Clear();
+    g_activeAnimIdx = kNoActiveAnim;
+    return;
+  }
+
+  // Auto-create the folder if it's the project-default path. We assume the
+  // user wants it; if the override is set to a missing folder we don't
+  // create that one (overrides are explicit user choices and shouldn't be
+  // silently materialised in odd places).
+  const std::string override = GetProjectAnimationsOverride();
+  if (override.empty()) {
+    EnsureFolderExists(dir);
+  }
+
   std::string log;
   const std::size_t loaded = g_lib.ScanFolder(dir, GetFps(), &log);
   g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
@@ -227,17 +511,32 @@ void RebuildLibraryAndRegions(const std::string& dir) {
   g_poses.Clear();
   g_activeAnimIdx = kNoActiveAnim;
 
-  // Restart the watcher on this directory. Stop() is idempotent.
-  // If hot-reload is disabled, we still call Stop to be sure no stale watcher
-  // is running from a previous folder.
-  g_watcher.Stop();
-  g_pendingNewAnimations.clear();
-  g_watcherEventsAccumulating = false;
-  if (HotReloadEnabled() && !dir.empty()) {
+  if (HotReloadEnabled()) {
     if (!g_watcher.Start(dir)) {
       ConsoleLog("[holoroll] FolderWatcher failed to start on: " + dir + "\n");
     }
   }
+}
+
+// Called by OnTimer when the active project has changed (open / save-as /
+// switch / close). Repoints the library and watcher at the new project's
+// animations folder. Also drains the Incoming folder so any orphan files
+// that arrived while the user had no saved project get picked up by the
+// new one.
+void OnProjectChanged() {
+  const std::string newPath = GetActiveProjectPath();
+  ConsoleLog("[holoroll] project changed: " +
+             (newPath.empty() ? std::string("(Untitled)") : newPath) + "\n");
+  g_currentProjectPath = newPath;
+
+  // Move any pending files from Incoming/ into the new project's
+  // Animations/. This must run BEFORE RebuildLibraryAndRegions so the
+  // initial scan picks them up. RebuildLibraryAndRegions itself may
+  // produce hot-reload events on files we just moved — that's fine,
+  // they'll surface as "new animations" in the modal.
+  DrainIncomingToProject();
+
+  RebuildLibraryAndRegions("");
 }
 
 void DeleteOurRegions() {
@@ -295,11 +594,19 @@ void PlaceOurRegions() {
 
 void RunFolderPicker() {
   HWND owner = g_viewport.IsOpen() ? g_viewport.Hwnd() : nullptr;
-  const std::string current = g_lib.Directory();
-  const std::string chosen = folder_picker::BrowseForFolder(owner, "Select animations folder (.mdd / .glb)", current);
+  const std::string current = g_currentAnimationsFolder;
+  const std::string chosen = folder_picker::BrowseForFolder(owner, "Override animations folder for this project", current);
   if (chosen.empty()) return;
-  PersistAnimationsDir(chosen);
-  RebuildLibraryAndRegions(chosen);
+  // Save as project-level override. Default project folder is no longer
+  // a global config knob — the only way to change it is per-project.
+  SetProjectAnimationsOverride(chosen);
+  RebuildLibraryAndRegions("");
+}
+
+// Reset the project override and go back to <project>/Animations/.
+void ResetFolderToProjectDefault() {
+  SetProjectAnimationsOverride("");
+  RebuildLibraryAndRegions("");
 }
 
 void OpenViewportIfNeeded() {
@@ -312,11 +619,22 @@ void OpenViewportIfNeeded() {
     }
     // Apply persisted scene settings to the freshly-opened viewport.
     ApplySceneSettingsToViewport();
+
+    // v0.9.0: register OLE drop target so files dragged from Explorer
+    // onto the viewport land in the active project's Animations/ folder.
+    // The acceptance query lets the drop overlay show an amber "save the
+    // project first" hint instead of a green "drop here" when the project
+    // is Untitled.
+    drop_target::RegisterOnHwnd(
+        g_viewport.Hwnd(),
+        OnViewportFilesDropped,
+        []() { return !ResolveActiveAnimationsFolder().empty(); });
   }
 }
 
 void CloseViewportIfNeeded() {
   if (g_viewport.IsOpen()) {
+    drop_target::UnregisterFromHwnd(g_viewport.Hwnd());
     const auto& api = g_bridge.Api();
     if (api.dockWindowRemove) api.dockWindowRemove(g_viewport.Hwnd());
     g_viewport.Close();
@@ -333,17 +651,15 @@ void ReloadConfigFromDisk() {
   g_config.Load(ConfigFilePath());
   EnsureConfigDefaults();
   ApplyRegionPrefixFromConfig();
-  const std::string dir = ResolveAnimationsDir();
-  if (!dir.empty() && dir != g_lib.Directory()) {
-    RebuildLibraryAndRegions(dir);
-  } else {
-    g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
-  }
+  // The folder is now project-relative, not config-driven, so changing
+  // the config doesn't trigger a folder change. We do still rebuild
+  // regions in case `fps` or `region_gap_seconds` changed.
+  g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
   // Pick up scene settings the user may have edited in the file.
   if (g_viewport.IsOpen()) ApplySceneSettingsToViewport();
-  // If the user just toggled hot_reload.enabled, restart the watcher to match.
-  if (HotReloadEnabled() && !g_lib.Directory().empty() && !g_watcher.IsRunning()) {
-    g_watcher.Start(g_lib.Directory());
+  // Hot-reload toggle may have flipped.
+  if (HotReloadEnabled() && !g_currentAnimationsFolder.empty() && !g_watcher.IsRunning()) {
+    g_watcher.Start(g_currentAnimationsFolder);
   } else if (!HotReloadEnabled() && g_watcher.IsRunning()) {
     g_watcher.Stop();
     g_pendingNewAnimations.clear();
@@ -730,6 +1046,36 @@ void SpikeTestCreateItem() {
   SpikeLog(summary);
 }
 
+// Drain Incoming-folder events. When the burst settles, move all eligible
+// files into the active project's Animations/. The project-folder watcher
+// will then naturally pick up the new files and surface the
+// "new animations" modal in OnTimer's regular flow. This means the user
+// only sees ONE modal per drop, regardless of which folder it lands in.
+//
+// If no project is active (Untitled), files stay in Incoming/. They'll be
+// drained when the user saves the project (OnProjectChanged calls
+// DrainIncomingToProject too).
+void ProcessIncomingWatcherEvents() {
+  if (!g_incomingWatcher.IsRunning()) return;
+
+  auto events = g_incomingWatcher.Drain();
+  const ULONGLONG now = GetTickCount64();
+  if (!events.empty()) {
+    g_lastIncomingEventTick = now;
+    g_incomingEventsAccumulating = true;
+  }
+  if (!g_incomingEventsAccumulating) return;
+  if (now - g_lastIncomingEventTick < kWatcherDebounceMs) return;
+
+  g_incomingEventsAccumulating = false;
+
+  const std::size_t moved = DrainIncomingToProject();
+  if (moved > 0) {
+    ConsoleLog("[holoroll] Incoming: drained " + std::to_string(moved) +
+               " file(s) into project.\n");
+  }
+}
+
 // Drain folder-watcher events, debounce them, and once the burst settles
 // (no new events for kWatcherDebounceMs), rescan the library and pick out
 // genuinely new basenames. Those go into g_pendingNewAnimations; the modal
@@ -857,10 +1203,27 @@ void OnTimer() {
 
   if (!g_viewport.IsOpen()) return;
 
+  // v0.7.0: detect REAPER project changes (open / save-as / switch / close).
+  // EnumProjects(-1) returns the .rpp path of the active project; when it
+  // differs from our cached value we rebuild library + watcher to point at
+  // the new project's Animations/ folder.
+  {
+    const std::string activePath = GetActiveProjectPath();
+    if (activePath != g_currentProjectPath) {
+      OnProjectChanged();
+    }
+  }
+
   // Hot-reload: drain folder watcher and (after debounce settles) scan for
   // newly-added animations. Populates g_pendingNewAnimations on success;
   // the modal renders once status.pendingNewAnimations is non-empty.
   ProcessWatcherEvents();
+
+  // v0.8.0: also drain the Incoming watcher and move files into the
+  // active project's Animations/ folder. After the move, the regular
+  // project-folder watcher (above) picks up the new file as a normal
+  // hot-reload event.
+  ProcessIncomingWatcherEvents();
 
   const double timelineTime = g_bridge.TimelineTimeSeconds();
 
@@ -872,12 +1235,14 @@ void OnTimer() {
   const ItemResolveResult itemResult = ResolvePlayheadFromItems(timelineTime, GetFps(), items);
 
   GlViewport::OverlayStatus status;
-  status.animationsDir = g_lib.Directory();
+  status.animationsDir = g_currentAnimationsFolder;
   status.loadedAnimationCount = g_lib.Count();
   status.regionCount = items.size();  // Reusing the field as item count.
   status.topologyAvailable = true;
   status.pendingNewAnimations = g_pendingNewAnimations;
   status.missingAnimationName = itemResult.missingAnimationName;
+  status.folderIsOverride = !GetProjectAnimationsOverride().empty();
+  status.projectUntitled = GetActiveProjectPath().empty() && !status.folderIsOverride;
 
   static const std::vector<float> kEmptyFloats;
   static const std::vector<std::uint32_t> kEmptyIndices;
@@ -968,6 +1333,7 @@ void OnTimer() {
   if (req.openConfig) OpenConfigInEditor();
   if (req.reloadConfig) ReloadConfigFromDisk();
   if (req.spikeTestCreateItem) SpikeTestCreateItem();
+  if (req.resetFolderOverride) ResetFolderToProjectDefault();
 
   // Handle the new-animations modal response.
   if (req.newAnimationsChoice == 1) {
@@ -1011,7 +1377,9 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
     }
     CloseViewportIfNeeded();
     g_watcher.Stop();
+    g_incomingWatcher.Stop();
     g_pendingNewAnimations.clear();
+    drop_target::Shutdown();
     g_bridge.Shutdown(g_rec);
     g_lib.Clear();
     g_poses.Clear();
@@ -1034,16 +1402,32 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
   ApplyRegionPrefixFromConfig();
   g_config.Save();
 
-  std::string animDir = ResolveAnimationsDir();
-  if (animDir.empty()) {
-    animDir = folder_picker::BrowseForFolder(nullptr, "Select animations folder (.mdd / .glb)", "");
-    if (!animDir.empty()) PersistAnimationsDir(animDir);
+  // v0.9.0: initialise OLE so we can register drop targets on our viewport.
+  // Returns true if OLE is usable; false here doesn't fail plugin load,
+  // it just means drag-n-drop won't work (the user's existing workflow
+  // through Incoming/ folder still works fine).
+  if (!drop_target::Initialize()) {
+    ConsoleLog("[holoroll] WARNING: OLE drag-n-drop init failed; viewport drops disabled.\n");
   }
 
-  if (!animDir.empty()) {
-    RebuildLibraryAndRegions(animDir);
-  } else {
-    ConsoleLog("[holoroll] no animations folder configured. Use 'Choose folder' to set one.\n");
+  // The animations folder is resolved on the first OnTimer tick from the
+  // active project's path. No initial folder picker (v0.7.0 ditched the
+  // global animations_dir concept). Untitled projects show a hint in the
+  // overlay; saving the project triggers folder creation automatically.
+
+  // v0.8.0: ensure the global Incoming folder exists and start watching it.
+  // Files arriving here are auto-moved into the active project's
+  // Animations/ folder by ProcessIncomingWatcherEvents() on the next tick.
+  {
+    const std::string incoming = GetIncomingFolder();
+    if (!incoming.empty()) {
+      EnsureFolderExists(incoming);
+      if (!g_incomingWatcher.Start(incoming)) {
+        ConsoleLog("[holoroll] WARNING: failed to start Incoming watcher on " + incoming + "\n");
+      } else {
+        ConsoleLog("[holoroll] watching Incoming folder: " + incoming + "\n");
+      }
+    }
   }
 
   if (!RegisterAction(rec, kToggleViewportCommandName, kToggleViewportActionDesc,

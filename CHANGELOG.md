@@ -7,6 +7,186 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-06
+
+A big release rolling up three internal milestones (project-relative
+folders, global Incoming auto-routing, drag-n-drop from Explorer) into a
+single workflow: drop animation files anywhere reasonable, watch them
+appear on the timeline.
+
+v0.7.0 and v0.8.0 were never tagged — their content is included here.
+
+## Headline features
+
+### Project-relative animations folder
+
+The animations folder follows whatever REAPER project is active.
+
+- `<project>/Animations/` is the new default folder. Open a saved REAPER
+  project, and HoloRoll auto-creates `Animations/` next to the `.rpp`
+  file (if it doesn't exist) and watches it. Drop `.mdd` / `.glb` files
+  in there and they appear in the library.
+- Per-project folder override via `Choose folder...`. The chosen path is
+  saved into the `.rpp` (REAPER `SetProjExtState`), so it travels with
+  the project. Open the same project on another machine and the override
+  is preserved (assuming the path exists there too).
+- `Reset to default folder` button shows up when an override is active.
+  Clears the override and goes back to `<project>/Animations/`.
+- Untitled-project hint: when no project is saved, the viewport shows a
+  single centered "Save the REAPER project to enable HoloRoll" message.
+  No 3D scene, no library/playback/camera/render UI sections — the user
+  immediately understands the plugin is intentionally idle. The moment
+  you save, the next OnTimer tick picks up the new path and creates
+  `Animations/`.
+- Project-change detection: switching between open projects, or closing
+  the project entirely, repoints the library and watcher automatically.
+  No restart needed.
+
+### Global Incoming folder
+
+A single well-known location that auto-routes files into the active
+project. Engine bridges, scripts, or the user can target this one path
+without knowing which REAPER project is currently open.
+
+- Path: `%APPDATA%\REAPER\UserPlugins\HoloRollIncoming\`. Created
+  automatically on plugin startup.
+- Files dropped here (`.mdd` / `.glb` / `.obj`) are watched and
+  auto-moved into the active project's `Animations/` folder on the next
+  OnTimer tick after a 500ms debounce.
+- Drain-on-project-change: when the user saves an Untitled project (or
+  switches between projects), any files left over in Incoming/
+  immediately move to the new project's Animations/. Files that arrived
+  while the user had no saved project are not lost.
+- Collision-renaming on move: if a file with the same name already
+  exists in the project's `Animations/`, the incoming file is renamed
+  with a `_<N>` suffix (`frog_jump_2.glb`, `frog_jump_3.glb`...). The
+  variation-suffix matcher already strips these for playback, so the
+  new file naturally becomes another variation of the same animation
+  — no data loss, no overwrite.
+
+### Drag-n-drop from Windows Explorer
+
+Drag `.mdd` / `.glb` / `.obj` files from Explorer onto the HoloRoll 3D
+viewport. Files land in the active project's Animations/ folder, with
+the regular hot-reload modal following.
+
+- OLE drop target on the viewport window. Anything else (audio, midi,
+  video) is silently ignored — those are REAPER's domain.
+- Files move directly into `<project>/Animations/` (skipping Incoming/
+  for a faster path).
+- Cross-disk drops work (`MoveFileExA` with `MOVEFILE_COPY_ALLOWED`).
+- New module `src/extension/drop_target.{h,cpp}` isolates the OLE
+  plumbing (`IDropTarget` impl, `RegisterDragDrop`, lifecycle) from
+  `entry.cpp`.
+
+### Drop-zone visual feedback
+
+While a drag is in progress over the viewport, the scene dims, an 8-pixel
+coloured border appears around the viewport, and a centered text plate
+explains what will happen. Three states:
+
+- **Green** — valid files + saved project. Plate text:
+  *"Drop here to add to project"*.
+- **Amber** — valid files + Untitled project. Plate text:
+  *"Save the REAPER project first"*. Drop is rejected.
+- **Red** — unrecognised file types. Plate text:
+  *"Unsupported file type"*. Drop is rejected.
+
+The overlay disappears the instant the cursor leaves the viewport or
+the drop completes. Implemented via `std::atomic<bool>` flags published
+by the OLE callbacks and read lock-free from the render path.
+
+## Pipeline summary
+
+```
+engine bridge / user / script / Explorer drag
+           |
+           v
+   HoloRollIncoming/    (global, well-known)         OR direct viewport drop
+           |                                                |
+           v  (auto-move on watcher event or project change) v  (immediate move)
+   <project>/Animations/    <-------------------------------+
+           |
+           v  (project watcher, 500ms debounce)
+   library scan -> hot-reload modal -> items at cursor on selected track
+```
+
+## Behaviour notes
+
+- Saved project + drop: files move into `<project>/Animations/`,
+  hot-reload picks them up within ~500 ms, modal appears.
+- Untitled project + Explorer drop: drop is rejected with a console log
+  message. Drop overlay shows amber state with the reason.
+- Untitled project + Incoming/ drop: files stay in Incoming/ until you
+  save a project. There is no auto-cleanup of stale Incoming files yet
+  — if you decide not to save, you'll need to manually delete them
+  from Incoming/.
+- File already inside `<project>/Animations/` and dragged onto the
+  viewport: silent no-op.
+- Move failure (e.g. network drive, permissions): logged to console with
+  `GetLastError`, file stays where it is.
+
+## Removed / Changed
+
+- **`animations_dir` config key removed.** v0.6.0 used a global config
+  ini for the folder; this is gone. The folder is now strictly
+  project-relative (or per-project override). Old config files keep
+  loading; the orphan `animations_dir=` line is just ignored.
+- The folder picker title was renamed to "Override animations folder
+  for this project" to make the per-project nature obvious.
+- Library section in overlay distinguishes default-vs-override folders
+  with a small subtitle when an override is active.
+- OLE is initialised at plugin startup. If REAPER has already done
+  `OleInitialize` (the typical case), our call returns `S_FALSE` and
+  we record "already init by other" so we don't unbalance the ref
+  count on shutdown.
+
+## Migration from v0.6.0
+
+There is no automatic migration. v0.6.0 projects that relied on a global
+animations folder will load with an empty library after upgrade. To
+migrate:
+
+1. Copy your animation files into `<project>/Animations/`, OR
+2. Click `Choose folder...` and point it at your existing folder —
+   this saves an override into the project, OR
+3. Drop the files in `%APPDATA%\REAPER\UserPlugins\HoloRollIncoming\`
+   and they'll auto-move into the current project.
+
+## Not in this release
+
+- **Drop directly onto the REAPER timeline** (arrange window) was
+  considered but skipped. Reason: REAPER already registers its own OLE
+  drop target on arrange for native audio / midi import; our drop target
+  would either lose those drops or require a forwarding wrapper that's
+  fragile across REAPER versions. The viewport drop + Incoming folder
+  cover ~95% of real workflows without that risk.
+- **Drag-detection on the REAPER main window** (highlighting the
+  viewport when a drag enters REAPER but not yet the viewport itself)
+  was prototyped but skipped. The Win32 OLE API only delivers DragEnter
+  events to the window the cursor is over; system-wide hooks or
+  registering competing drop targets on REAPER's own windows would
+  break native REAPER drag-n-drop. Standard behaviour (overlay appears
+  when the cursor crosses the viewport) matches Photoshop / Blender /
+  OBS conventions.
+
+## Internal
+
+- New REAPER API bindings: `EnumProjects`, `SetProjExtState`,
+  `GetProjExtState`.
+- New globals `g_currentProjectPath` (sentinel-initialised so first
+  OnTimer always triggers a project-changed handler),
+  `g_currentAnimationsFolder` (cached resolved path), and
+  `g_incomingWatcher` (second `FolderWatcher` instance).
+- New helpers: `GetActiveProjectPath`, `DirOfPath`,
+  `GetProjectAnimationsOverride`, `SetProjectAnimationsOverride`,
+  `EnsureFolderExists` (recursive Win32 mkdir),
+  `ResolveActiveAnimationsFolder`, `OnProjectChanged`,
+  `ResetFolderToProjectDefault`, `GetIncomingFolder`,
+  `MoveFileWithCollisionRename`, `DrainIncomingToProject`,
+  `OnViewportFilesDropped`.
+- `oleaut32` linked in CMake target.
+
 ## [0.6.0] — 2026-05-05
 
 Items become the primary unit on the timeline. Regions are still created
@@ -285,7 +465,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.9.0
 [0.6.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.5.1
 [0.5.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.5.0

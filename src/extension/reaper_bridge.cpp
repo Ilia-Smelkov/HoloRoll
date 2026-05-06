@@ -39,6 +39,11 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.getActiveTake = reinterpret_cast<GetActiveTakeFn>(rec->GetFunc("GetActiveTake"));
   api.getSetMediaItemInfo_String = reinterpret_cast<GetSetMediaItemInfo_StringFn>(rec->GetFunc("GetSetMediaItemInfo_String"));
 
+  // Project introspection (v0.7.0 project-relative folders).
+  api.enumProjects = reinterpret_cast<EnumProjectsFn>(rec->GetFunc("EnumProjects"));
+  api.setProjExtState = reinterpret_cast<SetProjExtStateFn>(rec->GetFunc("SetProjExtState"));
+  api.getProjExtState = reinterpret_cast<GetProjExtStateFn>(rec->GetFunc("GetProjExtState"));
+
   return api.getPlayPosition && api.mainOnCommand;
 }
 

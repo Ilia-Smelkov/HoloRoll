@@ -46,6 +46,15 @@ class GlViewport {
     // name comes back to entry.cpp through the request's animationToPlace
     // field and is then created on the selected track at cursor position.
     std::string requestPlaceAnimation;
+
+    // v0.7.0: true when the active animations folder is a project-level
+    // override (set via Choose folder...). Drives the visibility of the
+    // "Reset to default folder" button in the overlay.
+    bool folderIsOverride = false;
+
+    // v0.7.0: true when no project is saved (Untitled). Overlay shows a
+    // hint instead of the regular library info.
+    bool projectUntitled = false;
   };
 
   struct OverlayRequests {
@@ -54,11 +63,15 @@ class GlViewport {
     bool placeRegions = false;
     bool openConfig = false;
     bool reloadConfig = false;
-  // v0.6.0 spike: try creating an empty media item with a name on the
-  // first selected track (or first track if nothing selected). Validates
-  // that the REAPER API path we plan to use for the items workflow
-  // actually works in this build.
-  bool spikeTestCreateItem = false;
+    // v0.6.0 spike: try creating an empty media item with a name on the
+    // first selected track (or first track if nothing selected). Validates
+    // that the REAPER API path we plan to use for the items workflow
+    // actually works in this build.
+    bool spikeTestCreateItem = false;
+
+  // v0.7.0: clear project's animations-folder override (return to
+  // <project>/Animations/). Only meaningful when the override is set.
+  bool resetFolderOverride = false;
 
     // Choice from the "new animations detected" modal.
     // 0 = no choice yet (modal still open or never shown).
