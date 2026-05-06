@@ -35,6 +35,17 @@ class GlViewport {
     // entry.cpp populates this from the folder watcher; the user's
     // response comes back via OverlayRequests.newAnimationsChoice.
     std::vector<std::string> pendingNewAnimations;
+
+    // Non-empty iff an item is under the playhead but its name does not
+    // resolve to any animation in the library (either directly or via
+    // variation-suffix stripping). Overlay shows a warning when set.
+    std::string missingAnimationName;
+
+    // Animation name to show under the "+ Place" buttons in the library
+    // section. Used when the user hits Place to create another item; the
+    // name comes back to entry.cpp through the request's animationToPlace
+    // field and is then created on the selected track at cursor position.
+    std::string requestPlaceAnimation;
   };
 
   struct OverlayRequests {
@@ -43,12 +54,21 @@ class GlViewport {
     bool placeRegions = false;
     bool openConfig = false;
     bool reloadConfig = false;
+  // v0.6.0 spike: try creating an empty media item with a name on the
+  // first selected track (or first track if nothing selected). Validates
+  // that the REAPER API path we plan to use for the items workflow
+  // actually works in this build.
+  bool spikeTestCreateItem = false;
 
     // Choice from the "new animations detected" modal.
     // 0 = no choice yet (modal still open or never shown).
     // 1 = "Place all" — append regions for all pending new animations.
     // 2 = "Skip" — dismiss the modal, leave regions alone.
     int newAnimationsChoice = 0;
+
+    // Non-empty if the user pressed "+ Place" next to a library entry.
+    // entry.cpp uses this to call PlaceSingleAtCursor(name).
+    std::string placeSingleAtCursor;
   };
 
   bool Open();

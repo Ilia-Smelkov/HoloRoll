@@ -65,6 +65,19 @@ class AnimationLibrary {
 
   std::size_t FindAnimationIndexByBasename(const std::string& basename) const;
 
+  // Resolve a REAPER item/region label back to an animation index. Tries
+  // direct basename match first; if that fails, strips a trailing "_<digits>"
+  // variation suffix and tries again. Returns std::numeric_limits<size_t>::max()
+  // if neither attempt finds an animation.
+  //
+  // Example: with library entries ["frog_jump", "enemy_hit"]
+  //   "frog_jump"   -> direct hit, returns frog_jump.
+  //   "frog_jump_2" -> no direct hit, strip _2 -> frog_jump, returns frog_jump.
+  //   "frog_jump_alt" -> no direct hit, no numeric suffix to strip, missing.
+  //   With library entries ["frog_jump", "frog_jump_2"]:
+  //   "frog_jump_2" -> direct hit, returns frog_jump_2 (real anim, not variation).
+  std::size_t ResolveAnimationByItemName(const std::string& itemName) const;
+
   const std::string& Directory() const { return directory_; }
 
   void BuildRegions(double fps, double gapSeconds, double startSeconds = 0.0);

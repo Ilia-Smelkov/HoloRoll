@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-05
+
+Items become the primary unit on the timeline. Regions are still created
+(as decoration) but no longer drive playback resolution — the playhead
+looks at items, top-down across tracks, and renders whichever animation
+the top item references by name.
+
+### Added
+- **Items as the playback driver.** `OnTimer` now enumerates all items
+  on every track, finds the one under the playhead (top track wins on
+  multi-track overlap), reads its name (take's `P_NAME`, fallback
+  item `P_NOTES`), and resolves it back to an animation in the
+  library.
+- **Variation suffix matching.** An item named `frog_jump_2` resolves
+  to the `frog_jump` animation if no animation literally called
+  `frog_jump_2` exists. The numeric suffix (`_<digits>`) is stripped
+  and the lookup is retried. Direct matches always win to avoid
+  surprising behavior with real files like `enemy_v2.glb`.
+- **`Place all` action** creates an item + matching region for every
+  loaded animation, in sequence, on the first track. Replaces the
+  v0.5.x `Place regions` (which only placed regions). The button has
+  been renamed in the overlay.
+- **Hot-reload modal places items at cursor.** When new files appear
+  in the watched folder, the "Place all" button creates items at the
+  play cursor on the first selected track, each one placed after the
+  previous, with a `region_gap_seconds` separator. Existing items are
+  not touched.
+- **Missing-animation warning.** If an item under the playhead names
+  an animation that's no longer in the library (file deleted, folder
+  changed), the overlay's Library section shows a red warning
+  "⚠ Animation 'X' not found" instead of silently rendering the
+  previous frame.
+- New REAPER API bindings for item enumeration and creation:
+  `AddMediaItemToTrack`, `AddTakeToMediaItem`, `SetMediaItemInfo_Value`,
+  `GetSetMediaItemTakeInfo_String`, `GetSetMediaItemInfo_String`,
+  `GetTrack`, `GetSelectedTrack`, `CountTracks`, `CountTrackMediaItems`,
+  `GetTrackMediaItem`, `GetMediaItemInfo_Value`, `GetMediaItemTake`,
+  `GetActiveTake`, `UpdateArrange`.
+
+### Changed
+- **Region-only projects no longer play.** v0.5.x projects relied on
+  regions for resolution; this is gone. After upgrading, run
+  `Place all` (or recreate items manually) to get items on the
+  timeline. The CHANGELOG promised "backward compat with v0.5.x is
+  not a goal" — this is the consequence.
+- Regions created by `Place all` still get the same purple color and
+  same name as the corresponding item, so the visual lookup is
+  unchanged — they just don't drive playback anymore.
+- Library section in overlay relabels region-related text as items:
+  "Loaded N animation(s), M item(s) on timeline", "Item time: X..Y".
+
+### Internal
+- Spike helper `SpikeTestCreateItem` and its overlay button retained
+  for ad-hoc API smoke-testing during development. Will be removed
+  in v0.7.0 once the items workflow has settled.
+
 ## [0.5.1] — 2026-05-05
 
 Patch fixing GLB files with embedded textures.
@@ -229,7 +285,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.5.1
 [0.5.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.4.0

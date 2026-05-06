@@ -867,18 +867,33 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
 
   if (ImGui::CollapsingHeader("Library", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::TextWrapped("Folder: %s", status.animationsDir.empty() ? "(not set)" : status.animationsDir.c_str());
-    ImGui::Text("Loaded: %u animation(s), %u region(s)",
+    ImGui::Text("Loaded: %u animation(s), %u item(s) on timeline",
                 static_cast<unsigned>(status.loadedAnimationCount),
                 static_cast<unsigned>(status.regionCount));
     ImGui::Text("Active: %s", status.currentAnimation.empty() ? "(none)" : status.currentAnimation.c_str());
     if (status.activeRegionEnd > status.activeRegionStart) {
-      ImGui::Text("Region: %.3fs .. %.3fs", status.activeRegionStart, status.activeRegionEnd);
+      ImGui::Text("Item time: %.3fs .. %.3fs", status.activeRegionStart, status.activeRegionEnd);
     }
+
+    // Warning: an item is under the playhead but its name does not match any
+    // animation in the current library. Shows in red so it's hard to miss.
+    if (!status.missingAnimationName.empty()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
+                         "⚠ Animation '%s' not found",
+                         status.missingAnimationName.c_str());
+    }
+
     if (ImGui::Button("Choose folder...")) pendingRequests_.chooseFolder = true;
     ImGui::SameLine();
     if (ImGui::Button("Reload folder")) pendingRequests_.reloadFolder = true;
     ImGui::SameLine();
-    if (ImGui::Button("Place regions")) pendingRequests_.placeRegions = true;
+    if (ImGui::Button("Place all")) pendingRequests_.placeRegions = true;
+
+    // v0.6.0 SPIKE: validates we can create empty named items via REAPER API.
+    // Will be removed (or repurposed) once the items workflow lands.
+    ImGui::Separator();
+    ImGui::TextDisabled("DEV: items API spike");
+    if (ImGui::Button("Test create item")) pendingRequests_.spikeTestCreateItem = true;
   }
 
   if (ImGui::CollapsingHeader("Config", ImGuiTreeNodeFlags_DefaultOpen)) {

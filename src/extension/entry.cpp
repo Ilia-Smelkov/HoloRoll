@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <cstdio>
 #include <limits>
 #include <string>
 #include <vector>
@@ -98,6 +99,14 @@ std::string ConfigFilePath() {
 constexpr bool kVerboseLog = false;
 void ConsoleLog(const std::string& msg) {
   if (!kVerboseLog) return;
+  if (g_bridge.Api().showConsoleMsg) g_bridge.Api().showConsoleMsg(msg.c_str());
+}
+
+// Always-on console output for the v0.6.0 spike. The regular ConsoleLog is
+// silenced by default to keep the REAPER console clean during normal use,
+// but the spike specifically wants the user to see what happened so we use
+// a dedicated path that ignores kVerboseLog.
+void SpikeLog(const std::string& msg) {
   if (g_bridge.Api().showConsoleMsg) g_bridge.Api().showConsoleMsg(msg.c_str());
 }
 
@@ -356,6 +365,371 @@ bool OnMainAction(int command, int flag) {
   return false;
 }
 
+// ---- v0.6.0 items workflow ------------------------------------------------
+//
+// Items are now the primary unit on the timeline; regions are added as a
+// label/grouping convenience that REAPER will move with the items by
+// default. Item NAME (take.P_NAME) carries the animation reference — we
+// look it up in AnimationLibrary at playback time, with variation suffixes
+// (_2, _3, ...) stripped to share one animation across multiple item copies.
+//
+// All API pointers must be checked before use; if a build of REAPER lacks
+// any of them the helper returns failure and logs which one was missing.
+
+// Buffer size for GetSetMediaItem*Info_String reads/writes. REAPER's spec
+// doesn't formally guarantee the buffer size needed for reads, but 1024
+// bytes is more than enough for any reasonable basename.
+constexpr std::size_t kItemNameBufferSize = 1024;
+
+// Read an item's name. Tries the active take's P_NAME first; falls back to
+// item P_NOTES if no take name is set. Returns empty string if neither is
+// readable or both are empty.
+std::string ReadItemName(MediaItem* item) {
+  if (!item) return {};
+  const auto& api = g_bridge.Api();
+
+  if (api.getActiveTake && api.getSetMediaItemTakeInfo_String) {
+    if (MediaItem_Take* take = api.getActiveTake(item)) {
+      char buf[kItemNameBufferSize] = {};
+      if (api.getSetMediaItemTakeInfo_String(take, "P_NAME", buf, false) && buf[0] != '\0') {
+        return std::string(buf);
+      }
+    }
+  }
+  if (api.getSetMediaItemInfo_String) {
+    char buf[kItemNameBufferSize] = {};
+    if (api.getSetMediaItemInfo_String(item, "P_NOTES", buf, false) && buf[0] != '\0') {
+      return std::string(buf);
+    }
+  }
+  return {};
+}
+
+// Create a single empty named item on `track` at `position` with `length`
+// seconds and `name` as the take's display name. Returns true on success.
+// Caller is responsible for batching UpdateArrange.
+bool CreateNamedItem(MediaTrack* track, double position, double length, const std::string& name) {
+  if (!track) return false;
+  const auto& api = g_bridge.Api();
+  if (!api.addMediaItemToTrack || !api.setMediaItemInfo_Value ||
+      !api.addTakeToMediaItem || !api.getSetMediaItemTakeInfo_String) {
+    return false;
+  }
+
+  MediaItem* item = api.addMediaItemToTrack(track);
+  if (!item) return false;
+  api.setMediaItemInfo_Value(item, "D_POSITION", position);
+  api.setMediaItemInfo_Value(item, "D_LENGTH", std::max(0.001, length));
+
+  MediaItem_Take* take = api.addTakeToMediaItem(item);
+  if (take) {
+    char buf[kItemNameBufferSize];
+    std::snprintf(buf, sizeof(buf), "%s", name.c_str());
+    api.getSetMediaItemTakeInfo_String(take, "P_NAME", buf, true);
+  }
+  return true;
+}
+
+// One item discovered on the timeline, normalised to what ResolvePlayhead
+// needs. trackIndex preserves source order: lower index = higher in REAPER's
+// track list = wins resolution conflicts.
+struct DiscoveredItem {
+  int trackIndex = 0;
+  double startSeconds = 0.0;
+  double endSeconds = 0.0;
+  std::string name;
+};
+
+// Walk every track in the project, then every item on each track, and return
+// items that have a non-empty name. Empty-named items are ignored on the
+// theory that they're noise (e.g. user dragged in a wav, deleted the take,
+// left an empty item we shouldn't try to drive).
+std::vector<DiscoveredItem> EnumProjectItems() {
+  std::vector<DiscoveredItem> out;
+  const auto& api = g_bridge.Api();
+  if (!api.countTracks || !api.getTrack || !api.countTrackMediaItems ||
+      !api.getTrackMediaItem || !api.getMediaItemInfo_Value) {
+    return out;
+  }
+
+  const int trackCount = api.countTracks(nullptr);
+  for (int t = 0; t < trackCount; ++t) {
+    MediaTrack* track = api.getTrack(nullptr, t);
+    if (!track) continue;
+    const int itemCount = api.countTrackMediaItems(track);
+    for (int i = 0; i < itemCount; ++i) {
+      MediaItem* item = api.getTrackMediaItem(track, i);
+      if (!item) continue;
+      const std::string name = ReadItemName(item);
+      if (name.empty()) continue;
+      const double pos = api.getMediaItemInfo_Value(item, "D_POSITION");
+      const double len = api.getMediaItemInfo_Value(item, "D_LENGTH");
+      DiscoveredItem di;
+      di.trackIndex = t;
+      di.startSeconds = pos;
+      di.endSeconds = pos + len;
+      di.name = name;
+      out.push_back(std::move(di));
+    }
+  }
+  return out;
+}
+
+// Resolution result. The two flags help OnTimer decide what to surface in
+// the overlay: missing means "item exists but I can't find that animation
+// in the library", which is a useful warning state distinct from "no
+// items at all" (foundAny=false).
+struct ItemResolveResult {
+  std::size_t animationIndex = std::numeric_limits<std::size_t>::max();
+  std::uint32_t frameIndex = 0;
+  double itemStart = 0.0;
+  double itemEnd = 0.0;
+  std::string missingAnimationName;  // Non-empty iff item found but anim missing.
+  bool foundAny = false;             // True if any item overlapped the playhead.
+};
+
+// Resolve which item is under the playhead. Walks tracks top-down (lower
+// trackIndex = higher in REAPER UI = wins). Inside the chosen item, computes
+// the frame as floor((playhead - item.start) * fps), clamped to the
+// animation's last frame so a too-long item shows rest pose at the end.
+ItemResolveResult ResolvePlayheadFromItems(double playheadSeconds,
+                                           double fps,
+                                           const std::vector<DiscoveredItem>& items) {
+  ItemResolveResult result;
+
+  // Tracks are visited in order, so the first overlap we hit is by
+  // definition the topmost track's item.
+  for (const auto& di : items) {
+    if (playheadSeconds < di.startSeconds || playheadSeconds > di.endSeconds) continue;
+
+    result.foundAny = true;
+    result.itemStart = di.startSeconds;
+    result.itemEnd = di.endSeconds;
+
+    const std::size_t animIdx = g_lib.ResolveAnimationByItemName(di.name);
+    if (animIdx == std::numeric_limits<std::size_t>::max()) {
+      result.missingAnimationName = di.name;
+      return result;
+    }
+
+    result.animationIndex = animIdx;
+    const LoadedAnimation& anim = g_lib.At(animIdx);
+    const std::uint32_t totalFrames = anim.TotalFrames();
+    if (totalFrames == 0) {
+      result.frameIndex = 0;
+    } else {
+      const double localTime = std::max(0.0, playheadSeconds - di.startSeconds);
+      double f = std::floor(localTime * fps);
+      const double lastFrame = static_cast<double>(totalFrames - 1);
+      if (f > lastFrame) f = lastFrame;
+      result.frameIndex = static_cast<std::uint32_t>(f);
+    }
+    return result;
+  }
+
+  return result;
+}
+
+// Replacement for PlaceOurRegions. For each animation in the library,
+// appends an item + matching region in sequence starting at startSeconds.
+// Items go on `targetTrack` or first track if null.
+void PlaceOurItemsAndRegions(MediaTrack* targetTrack, double startSeconds) {
+  const auto& api = g_bridge.Api();
+  if (!api.addProjectMarker2 || !api.updateArrange) {
+    SpikeLog("[holoroll] cannot place items: REAPER API incomplete.\n");
+    return;
+  }
+  // Wipe our existing regions to avoid duplicates on re-run. Items are left
+  // in place by design — user-created content is never auto-deleted.
+  DeleteOurRegions();
+
+  if (!targetTrack && api.getTrack) targetTrack = api.getTrack(nullptr, 0);
+  if (!targetTrack) {
+    SpikeLog("[holoroll] cannot place items: no track in project.\n");
+    return;
+  }
+
+  const double fps = GetFps();
+  const double gap = GetGap();
+  const std::string& prefix = AnimationLibrary::RegionNamePrefix();
+  const int color = AnimationLibrary::RegionColorReaper();
+
+  double cursor = startSeconds;
+  std::size_t placed = 0;
+  for (std::size_t i = 0; i < g_lib.Count(); ++i) {
+    const LoadedAnimation& anim = g_lib.At(i);
+    const double duration = anim.DurationSeconds(fps);
+    if (duration <= 0.0) continue;
+
+    if (CreateNamedItem(targetTrack, cursor, duration, anim.basename)) {
+      const std::string regionName = prefix + anim.basename;
+      api.addProjectMarker2(nullptr, true, cursor, cursor + duration,
+                            regionName.c_str(), -1, color);
+      ++placed;
+    }
+    cursor += duration + gap;
+  }
+
+  api.updateArrange();
+  ConsoleLog("[holoroll] placed " + std::to_string(placed) + " items+regions.\n");
+}
+
+// Place pending hot-reload animations at the play cursor on the first
+// selected track (or first track if nothing selected). Each animation
+// goes after the previous one with a gap; existing items are not
+// touched. This is the modal's "Place at cursor" path.
+void PlacePendingAtCursor() {
+  if (g_pendingNewAnimations.empty()) return;
+  const auto& api = g_bridge.Api();
+
+  MediaTrack* track = nullptr;
+  if (api.getSelectedTrack) track = api.getSelectedTrack(nullptr, 0);
+  if (!track && api.getTrack) track = api.getTrack(nullptr, 0);
+  if (!track) {
+    SpikeLog("[holoroll] cannot place at cursor: no track in project.\n");
+    g_pendingNewAnimations.clear();
+    return;
+  }
+
+  const double cursorPos = api.getCursorPositionEx ? api.getCursorPositionEx(nullptr) : 0.0;
+  const double fps = GetFps();
+  const double gap = GetGap();
+  const std::string& prefix = AnimationLibrary::RegionNamePrefix();
+  const int color = AnimationLibrary::RegionColorReaper();
+
+  double pos = cursorPos;
+  std::size_t placed = 0;
+  for (const std::string& basename : g_pendingNewAnimations) {
+    const std::size_t idx = g_lib.FindAnimationIndexByBasename(basename);
+    if (idx == std::numeric_limits<std::size_t>::max()) continue;
+    const LoadedAnimation& anim = g_lib.At(idx);
+    const double duration = anim.DurationSeconds(fps);
+    if (duration <= 0.0) continue;
+
+    if (CreateNamedItem(track, pos, duration, basename)) {
+      if (api.addProjectMarker2) {
+        const std::string regionName = prefix + basename;
+        api.addProjectMarker2(nullptr, true, pos, pos + duration,
+                              regionName.c_str(), -1, color);
+      }
+      ++placed;
+    }
+    pos += duration + gap;
+  }
+
+  if (api.updateArrange) api.updateArrange();
+  ConsoleLog("[holoroll] hot-reload: placed " + std::to_string(placed) +
+             " item(s) starting at " + std::to_string(cursorPos) + "s.\n");
+  g_pendingNewAnimations.clear();
+}
+
+// Convenience: create one item for a single named animation at the cursor.
+// Used by the "+ Place" buttons in the overlay's library list.
+void PlaceSingleAtCursor(const std::string& basename) {
+  const auto& api = g_bridge.Api();
+  MediaTrack* track = nullptr;
+  if (api.getSelectedTrack) track = api.getSelectedTrack(nullptr, 0);
+  if (!track && api.getTrack) track = api.getTrack(nullptr, 0);
+  if (!track) return;
+
+  const std::size_t idx = g_lib.FindAnimationIndexByBasename(basename);
+  if (idx == std::numeric_limits<std::size_t>::max()) return;
+  const LoadedAnimation& anim = g_lib.At(idx);
+  const double duration = anim.DurationSeconds(GetFps());
+  if (duration <= 0.0) return;
+
+  const double cursorPos = api.getCursorPositionEx ? api.getCursorPositionEx(nullptr) : 0.0;
+  CreateNamedItem(track, cursorPos, duration, basename);
+  if (api.updateArrange) api.updateArrange();
+}
+
+// ---- v0.6.0 spike: create an empty named item on a track ------------------
+//
+// Validates the REAPER API path we plan to use for the items workflow:
+//   1. Find a target track (first selected, or first track if none selected).
+//   2. AddMediaItemToTrack       → empty item.
+//   3. SetMediaItemInfo_Value    → D_POSITION + D_LENGTH.
+//   4. AddTakeToMediaItem        → take needed for naming.
+//   5. GetSetMediaItemTakeInfo_String P_NAME → set the take's display name.
+//   6. UpdateArrange             → force REAPER to repaint the timeline so
+//                                  the new item is visible immediately.
+//
+// All output goes to the REAPER console regardless of kVerboseLog so the user
+// can see exactly what happened. If any of the API pointers are missing the
+// helper bails with a useful message and the rest of the plugin keeps working.
+void SpikeTestCreateItem() {
+  const auto& api = g_bridge.Api();
+
+  // Phase 1: required API symbols.
+  struct ApiCheck { const char* name; const void* fn; };
+  const ApiCheck required[] = {
+    {"AddMediaItemToTrack",          reinterpret_cast<const void*>(api.addMediaItemToTrack)},
+    {"AddTakeToMediaItem",           reinterpret_cast<const void*>(api.addTakeToMediaItem)},
+    {"SetMediaItemInfo_Value",       reinterpret_cast<const void*>(api.setMediaItemInfo_Value)},
+    {"GetSetMediaItemTakeInfo_String",reinterpret_cast<const void*>(api.getSetMediaItemTakeInfo_String)},
+    {"UpdateArrange",                reinterpret_cast<const void*>(api.updateArrange)},
+  };
+  for (const auto& ck : required) {
+    if (ck.fn == nullptr) {
+      SpikeLog(std::string("[holoroll-spike] FAIL: missing REAPER API: ") + ck.name + "\n");
+      return;
+    }
+  }
+
+  // Phase 2: pick a track. Prefer first selected; fall back to first track.
+  MediaTrack* track = nullptr;
+  if (api.getSelectedTrack) {
+    track = api.getSelectedTrack(nullptr, 0);
+    if (track) SpikeLog("[holoroll-spike] using first selected track\n");
+  }
+  if (!track && api.getTrack) {
+    track = api.getTrack(nullptr, 0);
+    if (track) SpikeLog("[holoroll-spike] no selected track; using track 0\n");
+  }
+  if (!track) {
+    SpikeLog("[holoroll-spike] FAIL: no tracks in project. Add a track and retry.\n");
+    return;
+  }
+
+  // Phase 3: pick a position. Use the play cursor position if available,
+  // otherwise 0. Length is 2 seconds (arbitrary, just visible).
+  const double position = api.getCursorPositionEx ? api.getCursorPositionEx(nullptr) : 0.0;
+  constexpr double length = 2.0;
+
+  // Phase 4: create the item.
+  MediaItem* item = api.addMediaItemToTrack(track);
+  if (!item) {
+    SpikeLog("[holoroll-spike] FAIL: AddMediaItemToTrack returned null\n");
+    return;
+  }
+  api.setMediaItemInfo_Value(item, "D_POSITION", position);
+  api.setMediaItemInfo_Value(item, "D_LENGTH", length);
+
+  // Phase 5: add a take and set its name. Empty items show the take name as
+  // their on-timeline label, so this is what the user will see.
+  MediaItem_Take* take = api.addTakeToMediaItem(item);
+  if (!take) {
+    SpikeLog("[holoroll-spike] FAIL: AddTakeToMediaItem returned null\n");
+    return;
+  }
+  // GetSetMediaItemTakeInfo_String wants a writable buffer even when setting.
+  // Spec: pass the new value via a non-const buffer.
+  char nameBuffer[256] = "holoroll_test";
+  const bool nameSet = api.getSetMediaItemTakeInfo_String(take, "P_NAME", nameBuffer, true);
+  if (!nameSet) {
+    SpikeLog("[holoroll-spike] WARN: P_NAME set returned false (item created, name may be empty)\n");
+  }
+
+  // Phase 6: ask REAPER to redraw.
+  api.updateArrange();
+
+  char summary[512];
+  std::snprintf(summary, sizeof(summary),
+                "[holoroll-spike] OK: created item at %.3fs, length %.1fs, name=\"holoroll_test\"\n",
+                position, length);
+  SpikeLog(summary);
+}
+
 // Drain folder-watcher events, debounce them, and once the burst settles
 // (no new events for kWatcherDebounceMs), rescan the library and pick out
 // genuinely new basenames. Those go into g_pendingNewAnimations; the modal
@@ -489,14 +863,21 @@ void OnTimer() {
   ProcessWatcherEvents();
 
   const double timelineTime = g_bridge.TimelineTimeSeconds();
-  const std::vector<TimelineRegion> liveRegions = ReadLiveRegionsFromReaper();
+
+  // v0.6.0: items are now the primary playback driver. Walk every track,
+  // every item, and resolve which one is under the playhead. Region
+  // metadata is no longer used for resolution — it's just decoration
+  // that follows items around (REAPER's default behavior).
+  const std::vector<DiscoveredItem> items = EnumProjectItems();
+  const ItemResolveResult itemResult = ResolvePlayheadFromItems(timelineTime, GetFps(), items);
 
   GlViewport::OverlayStatus status;
   status.animationsDir = g_lib.Directory();
   status.loadedAnimationCount = g_lib.Count();
-  status.regionCount = liveRegions.size();
+  status.regionCount = items.size();  // Reusing the field as item count.
   status.topologyAvailable = true;
   status.pendingNewAnimations = g_pendingNewAnimations;
+  status.missingAnimationName = itemResult.missingAnimationName;
 
   static const std::vector<float> kEmptyFloats;
   static const std::vector<std::uint32_t> kEmptyIndices;
@@ -506,11 +887,10 @@ void OnTimer() {
   std::uint32_t frame = 0;
   std::uint32_t totalFrames = 0;
 
-  std::size_t animIdx = 0;
-  const bool resolved =
-      g_lib.ResolvePlayhead(timelineTime, GetFps(), liveRegions, &animIdx, &frame);
-
+  const std::size_t animIdx = itemResult.animationIndex;
+  const bool resolved = animIdx != std::numeric_limits<std::size_t>::max();
   if (resolved) {
+    frame = itemResult.frameIndex;
     // IMPORTANT: status.autoPivot / autoExtent must be populated BEFORE
     // we touch pose state, because the first-time "fresh pose" branch
     // calls ResetCameraToDefault(status), which needs those values to
@@ -535,14 +915,10 @@ void OnTimer() {
     status.autoExtent = anim.autoExtent;
     status.restNormals = &anim.restNormals;
 
-    for (const auto& r : liveRegions) {
-      if (r.animationIndex == animIdx &&
-          timelineTime >= r.startSeconds && timelineTime <= r.endSeconds) {
-        status.activeRegionStart = r.startSeconds;
-        status.activeRegionEnd = r.endSeconds;
-        break;
-      }
-    }
+    // Surface the active item's time range to the overlay (it used to come
+    // from regions; items now drive this).
+    status.activeRegionStart = itemResult.itemStart;
+    status.activeRegionEnd = itemResult.itemEnd;
 
     // Now that status has correct bbox info, handle pose switching.
     if (g_activeAnimIdx != animIdx) {
@@ -588,13 +964,14 @@ void OnTimer() {
   if (req.reloadFolder) {
     if (!g_lib.Directory().empty()) RebuildLibraryAndRegions(g_lib.Directory());
   }
-  if (req.placeRegions) PlaceOurRegions();
+  if (req.placeRegions) PlaceOurItemsAndRegions(nullptr, 0.0);
   if (req.openConfig) OpenConfigInEditor();
   if (req.reloadConfig) ReloadConfigFromDisk();
+  if (req.spikeTestCreateItem) SpikeTestCreateItem();
 
   // Handle the new-animations modal response.
   if (req.newAnimationsChoice == 1) {
-    PlacePendingNewAnimations();
+    PlacePendingAtCursor();
   } else if (req.newAnimationsChoice == 2) {
     ConsoleLog("[holoroll] hot-reload: user dismissed " +
                std::to_string(g_pendingNewAnimations.size()) +

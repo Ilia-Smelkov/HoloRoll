@@ -3,6 +3,14 @@
 #include <cstdint>
 #include "reaper_plugin.h"
 
+// Forward declarations of REAPER opaque types we pass through the API. These
+// are declared (without definitions) in reaper_plugin_functions.h, but that
+// header pulls in a lot more than we need; declaring them here keeps our
+// dependency surface minimal.
+class MediaTrack;
+class MediaItem;
+class MediaItem_Take;
+
 using GetPlayPositionFn = double (*)();
 using GetPlayStateFn = int (*)();
 using GetCursorPositionExFn = double (*)(ReaProject* proj);
@@ -17,6 +25,27 @@ using HasExtStateFn = bool (*)(const char* section, const char* key);
 using DockWindowAddExFn = void (*)(HWND hwnd, const char* name, const char* identstr, bool allowShow);
 using DockWindowRemoveFn = void (*)(HWND hwnd);
 using DockWindowActivateFn = void (*)(HWND hwnd);
+
+// ---- Track / item / take APIs (used for spike: create empty item on a track) -----------
+//
+// MediaTrack and MediaItem / MediaItem_Take are opaque pointer types defined
+// inside reaper_plugin.h — we only ever pass them around without dereferencing.
+using GetSelectedTrackFn = MediaTrack* (*)(ReaProject* proj, int seltrackidx);
+using GetTrackFn = MediaTrack* (*)(ReaProject* proj, int trackidx);
+using CountTracksFn = int (*)(ReaProject* proj);
+using AddMediaItemToTrackFn = MediaItem* (*)(MediaTrack* tr);
+using AddTakeToMediaItemFn = MediaItem_Take* (*)(MediaItem* item);
+using SetMediaItemInfo_ValueFn = bool (*)(MediaItem* item, const char* parmname, double newvalue);
+using GetSetMediaItemTakeInfo_StringFn = bool (*)(MediaItem_Take* take, const char* parmname, char* stringNeedBig, bool setNewValue);
+using UpdateArrangeFn = void (*)();
+
+// ---- Item enumeration / read APIs (v0.6.0 items workflow) -------------------
+using CountTrackMediaItemsFn = int (*)(MediaTrack* tr);
+using GetTrackMediaItemFn = MediaItem* (*)(MediaTrack* tr, int itemidx);
+using GetMediaItemInfo_ValueFn = double (*)(MediaItem* item, const char* parmname);
+using GetMediaItemTakeFn = MediaItem_Take* (*)(MediaItem* item, int takeidx);
+using GetActiveTakeFn = MediaItem_Take* (*)(MediaItem* item);
+using GetSetMediaItemInfo_StringFn = bool (*)(MediaItem* item, const char* parmname, char* stringNeedBig, bool setNewValue);
 
 struct ReaperApi {
   GetPlayPositionFn getPlayPosition = nullptr;
@@ -33,6 +62,24 @@ struct ReaperApi {
   DockWindowAddExFn dockWindowAddEx = nullptr;
   DockWindowRemoveFn dockWindowRemove = nullptr;
   DockWindowActivateFn dockWindowActivate = nullptr;
+
+  // Track / item / take (spike for v0.6.0 items model).
+  GetSelectedTrackFn getSelectedTrack = nullptr;
+  GetTrackFn getTrack = nullptr;
+  CountTracksFn countTracks = nullptr;
+  AddMediaItemToTrackFn addMediaItemToTrack = nullptr;
+  AddTakeToMediaItemFn addTakeToMediaItem = nullptr;
+  SetMediaItemInfo_ValueFn setMediaItemInfo_Value = nullptr;
+  GetSetMediaItemTakeInfo_StringFn getSetMediaItemTakeInfo_String = nullptr;
+  UpdateArrangeFn updateArrange = nullptr;
+
+  // Item enumeration / read (v0.6.0 ResolvePlayhead via items).
+  CountTrackMediaItemsFn countTrackMediaItems = nullptr;
+  GetTrackMediaItemFn getTrackMediaItem = nullptr;
+  GetMediaItemInfo_ValueFn getMediaItemInfo_Value = nullptr;
+  GetMediaItemTakeFn getMediaItemTake = nullptr;
+  GetActiveTakeFn getActiveTake = nullptr;
+  GetSetMediaItemInfo_StringFn getSetMediaItemInfo_String = nullptr;
 };
 
 bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api);

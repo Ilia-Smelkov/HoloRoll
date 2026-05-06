@@ -209,6 +209,34 @@ std::size_t AnimationLibrary::FindAnimationIndexByBasename(const std::string& ba
   return std::numeric_limits<std::size_t>::max();
 }
 
+std::size_t AnimationLibrary::ResolveAnimationByItemName(const std::string& itemName) const {
+  // First try direct match. This intentionally takes priority over suffix
+  // stripping so that a real animation actually called "frog_jump_2" wins
+  // over the "variation" interpretation. Real animation names are rare and
+  // user-controlled; variations are common and ambiguity matters.
+  const std::size_t direct = FindAnimationIndexByBasename(itemName);
+  if (direct != std::numeric_limits<std::size_t>::max()) return direct;
+
+  // Try stripping a trailing "_<digits>" variation suffix. This matches
+  // REAPER's default duplicate naming pattern for items ("foo", "foo_2",
+  // "foo_3"...). We only strip a single such suffix — chained variations
+  // like "frog_jump_2_3" would resolve through the second strip too if the
+  // intermediate "frog_jump_2" doesn't exist, but that's caller-driven
+  // behaviour, not part of this method.
+  const auto underscore = itemName.find_last_of('_');
+  if (underscore == std::string::npos || underscore + 1 >= itemName.size()) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  const std::string tail = itemName.substr(underscore + 1);
+  const bool allDigits = !tail.empty() && std::all_of(tail.begin(), tail.end(),
+      [](unsigned char c) { return std::isdigit(c); });
+  if (!allDigits) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  const std::string base = itemName.substr(0, underscore);
+  return FindAnimationIndexByBasename(base);
+}
+
 std::size_t AnimationLibrary::ScanFolder(const std::string& directory,
                                          double fps,
                                          std::string* logOut) {

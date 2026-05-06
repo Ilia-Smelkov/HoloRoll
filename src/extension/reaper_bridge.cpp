@@ -20,6 +20,25 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.dockWindowRemove = reinterpret_cast<DockWindowRemoveFn>(rec->GetFunc("DockWindowRemove"));
   api.dockWindowActivate = reinterpret_cast<DockWindowActivateFn>(rec->GetFunc("DockWindowActivate"));
 
+  // Track / item / take APIs (v0.6.0 items spike). All optional — if any is
+  // missing, the spike button will report a useful error.
+  api.getSelectedTrack = reinterpret_cast<GetSelectedTrackFn>(rec->GetFunc("GetSelectedTrack"));
+  api.getTrack = reinterpret_cast<GetTrackFn>(rec->GetFunc("GetTrack"));
+  api.countTracks = reinterpret_cast<CountTracksFn>(rec->GetFunc("CountTracks"));
+  api.addMediaItemToTrack = reinterpret_cast<AddMediaItemToTrackFn>(rec->GetFunc("AddMediaItemToTrack"));
+  api.addTakeToMediaItem = reinterpret_cast<AddTakeToMediaItemFn>(rec->GetFunc("AddTakeToMediaItem"));
+  api.setMediaItemInfo_Value = reinterpret_cast<SetMediaItemInfo_ValueFn>(rec->GetFunc("SetMediaItemInfo_Value"));
+  api.getSetMediaItemTakeInfo_String = reinterpret_cast<GetSetMediaItemTakeInfo_StringFn>(rec->GetFunc("GetSetMediaItemTakeInfo_String"));
+  api.updateArrange = reinterpret_cast<UpdateArrangeFn>(rec->GetFunc("UpdateArrange"));
+
+  // Item enumeration / read (v0.6.0 items resolution path).
+  api.countTrackMediaItems = reinterpret_cast<CountTrackMediaItemsFn>(rec->GetFunc("CountTrackMediaItems"));
+  api.getTrackMediaItem = reinterpret_cast<GetTrackMediaItemFn>(rec->GetFunc("GetTrackMediaItem"));
+  api.getMediaItemInfo_Value = reinterpret_cast<GetMediaItemInfo_ValueFn>(rec->GetFunc("GetMediaItemInfo_Value"));
+  api.getMediaItemTake = reinterpret_cast<GetMediaItemTakeFn>(rec->GetFunc("GetMediaItemTake"));
+  api.getActiveTake = reinterpret_cast<GetActiveTakeFn>(rec->GetFunc("GetActiveTake"));
+  api.getSetMediaItemInfo_String = reinterpret_cast<GetSetMediaItemInfo_StringFn>(rec->GetFunc("GetSetMediaItemInfo_String"));
+
   return api.getPlayPosition && api.mainOnCommand;
 }
 
