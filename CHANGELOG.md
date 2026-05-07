@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-05-07
+
+Two placement fixes that surfaced after v0.9.0 shipped.
+
+### Fixed
+- **Items can no longer overlap existing regions on placement.** Previously
+  `Place all` and the hot-reload modal placed items starting at the play
+  cursor, which produced visible overlap when the user dropped files
+  multiple times in a row or when the cursor sat in the middle of
+  existing content. Placement is now deterministic: items always go
+  *after* `max(region.end) + region_gap_seconds`, regardless of where
+  the cursor is. New items also land on a freshly-created track at the
+  top of the project so the user keeps a clean separation between
+  HoloRoll content and their own tracks.
+- **Audio / video / midi items are no longer mistaken for HoloRoll items.**
+  Previously, the playhead resolver walked every item in the project,
+  read its name, and tried to match it against the animation library.
+  An audio file the user named `frog_jump.wav` would accidentally drive
+  playback if `frog_jump.glb` happened to be in the library. Now every
+  item HoloRoll creates carries a per-item ext-state marker
+  (`P_EXT:holoroll=1`); resolution and "+ Place" actions only consider
+  marked items. Anything else REAPER displays on the timeline is
+  invisible to HoloRoll.
+
+### Behaviour
+- New track at top: `Place all` and the hot-reload modal now insert a
+  fresh track at index 0 each time. The selected-track logic from v0.9.0
+  is gone — placement is no longer affected by which track happens to
+  be selected.
+- Placement origin: starts at `max(region.end) + region_gap_seconds` if
+  any regions exist; at `0` otherwise.
+
+### Migration
+- **Items created in v0.9.0 and earlier do not carry the new marker.**
+  After upgrade, those old items will no longer drive the viewport.
+  Re-run `Place all` (or use the hot-reload modal) to recreate them in
+  the new format. Old regions are recognised on cleanup as before.
+
+### Internal
+- New REAPER API binding: `InsertTrackAtIndex`.
+- New helpers in `entry.cpp`: `MarkAsHoloRollItem`, `IsHoloRollItem`,
+  `FindLastRegionEnd`, `EnsureTrackOnTop`. `CreateNamedItem` now tags
+  every item it creates.
+- `EnumProjectItems` filters by P_EXT marker; `PlaceOurItemsAndRegions`,
+  `PlacePendingAtCursor`, `PlaceSingleAtCursor` rewritten to use the
+  new top-track + post-region placement rule.
+
 ## [0.9.0] — 2026-05-06
 
 A big release rolling up three internal milestones (project-relative
@@ -465,7 +512,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.9.1
 [0.9.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.9.0
 [0.6.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.5.1

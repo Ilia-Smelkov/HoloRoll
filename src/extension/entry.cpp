@@ -81,6 +81,17 @@ constexpr char kCfgKeySceneGridStep[]   = "scene.grid_step";
 // etc.). Created automatically when a saved project is opened.
 constexpr char kProjectAnimationsSubdir[] = "Animations";
 
+// v0.9.1: marker stored on every item we create, via REAPER's per-item
+// extended state (P_EXT:<key>). When resolving the playhead and placing
+// new content, we ONLY consider items carrying this marker — that way an
+// audio file the user named "frog_jump.wav" doesn't accidentally match an
+// animation called "frog_jump.glb" in the library. Backwards-compatibility
+// note: items created in v0.9.0 and earlier don't carry this marker; they
+// won't be recognised as ours after upgrade. Re-run "Place all" to recreate
+// them in the new format.
+constexpr char kHoloRollItemMarkerKey[]   = "P_EXT:holoroll";
+constexpr char kHoloRollItemMarkerValue[] = "1";
+
 // Global "incoming" folder where engine bridges, scripts, or the user can
 // drop new animation files. Files appearing here are auto-moved into the
 // active project's Animations/ folder on next OnTimer tick. Path is
@@ -721,6 +732,70 @@ std::string ReadItemName(MediaItem* item) {
   return {};
 }
 
+// v0.9.1: tag this item as ours via per-item ext-state. Idempotent.
+bool MarkAsHoloRollItem(MediaItem* item) {
+  if (!item) return false;
+  const auto& api = g_bridge.Api();
+  if (!api.getSetMediaItemInfo_String) return false;
+  // GetSet wants a writable buffer even for set; copy the literal in.
+  char buf[8];
+  std::snprintf(buf, sizeof(buf), "%s", kHoloRollItemMarkerValue);
+  return api.getSetMediaItemInfo_String(item, kHoloRollItemMarkerKey, buf, true);
+}
+
+// v0.9.1: read back the marker. Returns true iff the item carries our tag.
+// Cheap: one GetSet call returning a one-byte string. Used by
+// EnumProjectItems to filter out non-HoloRoll content (audio, midi, video,
+// etc.) before resolving names against the animation library.
+bool IsHoloRollItem(MediaItem* item) {
+  if (!item) return false;
+  const auto& api = g_bridge.Api();
+  if (!api.getSetMediaItemInfo_String) return false;
+  char buf[8] = {};
+  if (!api.getSetMediaItemInfo_String(item, kHoloRollItemMarkerKey, buf, false)) {
+    return false;
+  }
+  return buf[0] != '\0';
+}
+
+// v0.9.1: find the latest region end across the entire project. Used to
+// place new items right after existing content so we never overlap.
+// Returns 0.0 if no regions exist (placement starts at timeline origin).
+double FindLastRegionEnd() {
+  const auto& api = g_bridge.Api();
+  if (!api.enumProjectMarkers3) return 0.0;
+
+  double last = 0.0;
+  int idx = 0;
+  while (true) {
+    bool isrgn = false;
+    double pos = 0.0, rgnend = 0.0;
+    const char* nm = nullptr;
+    int rgnIdx = 0, color = 0;
+    const int next = api.enumProjectMarkers3(nullptr, idx, &isrgn, &pos, &rgnend,
+                                             &nm, &rgnIdx, &color);
+    if (next == 0) break;
+    if (isrgn && rgnend > last) last = rgnend;
+    idx = next;
+  }
+  return last;
+}
+
+// v0.9.1: ensure there's a fresh track at index 0 (top of REAPER's track
+// list) and return it. Used by all "place items" code paths so newly-imported
+// animations always land on a clean dedicated row instead of mixing with
+// the user's existing tracks.
+//
+// We always create a new one rather than reusing track 0 — the user's
+// project may already have content on track 0 that we shouldn't disturb,
+// and visually "new track on top" is a clear signal that something arrived.
+MediaTrack* EnsureTrackOnTop() {
+  const auto& api = g_bridge.Api();
+  if (!api.insertTrackAtIndex || !api.getTrack) return nullptr;
+  api.insertTrackAtIndex(0, true);
+  return api.getTrack(nullptr, 0);
+}
+
 // Create a single empty named item on `track` at `position` with `length`
 // seconds and `name` as the take's display name. Returns true on success.
 // Caller is responsible for batching UpdateArrange.
@@ -743,6 +818,10 @@ bool CreateNamedItem(MediaTrack* track, double position, double length, const st
     std::snprintf(buf, sizeof(buf), "%s", name.c_str());
     api.getSetMediaItemTakeInfo_String(take, "P_NAME", buf, true);
   }
+
+  // v0.9.1: tag the item as ours so EnumProjectItems won't confuse it
+  // with audio/midi/video items that happen to share a name.
+  MarkAsHoloRollItem(item);
   return true;
 }
 
@@ -757,9 +836,9 @@ struct DiscoveredItem {
 };
 
 // Walk every track in the project, then every item on each track, and return
-// items that have a non-empty name. Empty-named items are ignored on the
-// theory that they're noise (e.g. user dragged in a wav, deleted the take,
-// left an empty item we shouldn't try to drive).
+// items that have a non-empty name AND carry our P_EXT marker. The marker
+// check (added in v0.9.1) prevents accidental matches with audio/midi/video
+// items the user happens to have named the same as one of our animations.
 std::vector<DiscoveredItem> EnumProjectItems() {
   std::vector<DiscoveredItem> out;
   const auto& api = g_bridge.Api();
@@ -776,6 +855,7 @@ std::vector<DiscoveredItem> EnumProjectItems() {
     for (int i = 0; i < itemCount; ++i) {
       MediaItem* item = api.getTrackMediaItem(track, i);
       if (!item) continue;
+      if (!IsHoloRollItem(item)) continue;
       const std::string name = ReadItemName(item);
       if (name.empty()) continue;
       const double pos = api.getMediaItemInfo_Value(item, "D_POSITION");
@@ -847,9 +927,12 @@ ItemResolveResult ResolvePlayheadFromItems(double playheadSeconds,
 }
 
 // Replacement for PlaceOurRegions. For each animation in the library,
-// appends an item + matching region in sequence starting at startSeconds.
-// Items go on `targetTrack` or first track if null.
-void PlaceOurItemsAndRegions(MediaTrack* targetTrack, double startSeconds) {
+// appends an item + matching region in sequence. v0.9.1: always creates a
+// fresh track at index 0 (top of REAPER's track list) and places items
+// after `max(region.end) + gap` so we never overlap with existing content.
+// The `targetTrack` and `startSeconds` parameters are ignored — retained
+// only to keep the existing call sites happy.
+void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
   const auto& api = g_bridge.Api();
   if (!api.addProjectMarker2 || !api.updateArrange) {
     SpikeLog("[holoroll] cannot place items: REAPER API incomplete.\n");
@@ -859,9 +942,9 @@ void PlaceOurItemsAndRegions(MediaTrack* targetTrack, double startSeconds) {
   // in place by design — user-created content is never auto-deleted.
   DeleteOurRegions();
 
-  if (!targetTrack && api.getTrack) targetTrack = api.getTrack(nullptr, 0);
+  MediaTrack* targetTrack = EnsureTrackOnTop();
   if (!targetTrack) {
-    SpikeLog("[holoroll] cannot place items: no track in project.\n");
+    SpikeLog("[holoroll] cannot place items: failed to create track.\n");
     return;
   }
 
@@ -870,7 +953,11 @@ void PlaceOurItemsAndRegions(MediaTrack* targetTrack, double startSeconds) {
   const std::string& prefix = AnimationLibrary::RegionNamePrefix();
   const int color = AnimationLibrary::RegionColorReaper();
 
-  double cursor = startSeconds;
+  // Start after the last existing region (regardless of who created it),
+  // so we never overlap. If no regions exist, start from 0 + gap.
+  const double lastEnd = FindLastRegionEnd();
+  double cursor = (lastEnd > 0.0) ? (lastEnd + gap) : 0.0;
+
   std::size_t placed = 0;
   for (std::size_t i = 0; i < g_lib.Count(); ++i) {
     const LoadedAnimation& anim = g_lib.At(i);
@@ -890,30 +977,30 @@ void PlaceOurItemsAndRegions(MediaTrack* targetTrack, double startSeconds) {
   ConsoleLog("[holoroll] placed " + std::to_string(placed) + " items+regions.\n");
 }
 
-// Place pending hot-reload animations at the play cursor on the first
-// selected track (or first track if nothing selected). Each animation
-// goes after the previous one with a gap; existing items are not
-// touched. This is the modal's "Place at cursor" path.
+// Place pending hot-reload animations after the last existing region.
+// v0.9.1: always creates a fresh track at index 0 and places items after
+// max(region.end) + gap. The play cursor is no longer used — placement is
+// deterministic regardless of where the cursor is.
 void PlacePendingAtCursor() {
   if (g_pendingNewAnimations.empty()) return;
   const auto& api = g_bridge.Api();
 
-  MediaTrack* track = nullptr;
-  if (api.getSelectedTrack) track = api.getSelectedTrack(nullptr, 0);
-  if (!track && api.getTrack) track = api.getTrack(nullptr, 0);
+  MediaTrack* track = EnsureTrackOnTop();
   if (!track) {
-    SpikeLog("[holoroll] cannot place at cursor: no track in project.\n");
+    SpikeLog("[holoroll] cannot place: failed to create track.\n");
     g_pendingNewAnimations.clear();
     return;
   }
 
-  const double cursorPos = api.getCursorPositionEx ? api.getCursorPositionEx(nullptr) : 0.0;
   const double fps = GetFps();
   const double gap = GetGap();
   const std::string& prefix = AnimationLibrary::RegionNamePrefix();
   const int color = AnimationLibrary::RegionColorReaper();
 
-  double pos = cursorPos;
+  // Start after the last existing region. If none, start at 0.
+  const double lastEnd = FindLastRegionEnd();
+  double pos = (lastEnd > 0.0) ? (lastEnd + gap) : 0.0;
+
   std::size_t placed = 0;
   for (const std::string& basename : g_pendingNewAnimations) {
     const std::size_t idx = g_lib.FindAnimationIndexByBasename(basename);
@@ -935,17 +1022,16 @@ void PlacePendingAtCursor() {
 
   if (api.updateArrange) api.updateArrange();
   ConsoleLog("[holoroll] hot-reload: placed " + std::to_string(placed) +
-             " item(s) starting at " + std::to_string(cursorPos) + "s.\n");
+             " item(s) starting at " + std::to_string(pos - placed * gap) + "s.\n");
   g_pendingNewAnimations.clear();
 }
 
-// Convenience: create one item for a single named animation at the cursor.
-// Used by the "+ Place" buttons in the overlay's library list.
+// Convenience: create one item for a single named animation. v0.9.1: same
+// rule as the other place functions — new track on top, starts after
+// max(region.end) + gap, ignores cursor.
 void PlaceSingleAtCursor(const std::string& basename) {
   const auto& api = g_bridge.Api();
-  MediaTrack* track = nullptr;
-  if (api.getSelectedTrack) track = api.getSelectedTrack(nullptr, 0);
-  if (!track && api.getTrack) track = api.getTrack(nullptr, 0);
+  MediaTrack* track = EnsureTrackOnTop();
   if (!track) return;
 
   const std::size_t idx = g_lib.FindAnimationIndexByBasename(basename);
@@ -954,8 +1040,18 @@ void PlaceSingleAtCursor(const std::string& basename) {
   const double duration = anim.DurationSeconds(GetFps());
   if (duration <= 0.0) return;
 
-  const double cursorPos = api.getCursorPositionEx ? api.getCursorPositionEx(nullptr) : 0.0;
-  CreateNamedItem(track, cursorPos, duration, basename);
+  const double lastEnd = FindLastRegionEnd();
+  const double pos = (lastEnd > 0.0) ? (lastEnd + GetGap()) : 0.0;
+
+  if (CreateNamedItem(track, pos, duration, basename)) {
+    if (api.addProjectMarker2) {
+      const std::string& prefix = AnimationLibrary::RegionNamePrefix();
+      const int color = AnimationLibrary::RegionColorReaper();
+      const std::string regionName = prefix + basename;
+      api.addProjectMarker2(nullptr, true, pos, pos + duration,
+                            regionName.c_str(), -1, color);
+    }
+  }
   if (api.updateArrange) api.updateArrange();
 }
 

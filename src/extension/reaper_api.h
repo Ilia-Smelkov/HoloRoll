@@ -47,6 +47,12 @@ using GetMediaItemTakeFn = MediaItem_Take* (*)(MediaItem* item, int takeidx);
 using GetActiveTakeFn = MediaItem_Take* (*)(MediaItem* item);
 using GetSetMediaItemInfo_StringFn = bool (*)(MediaItem* item, const char* parmname, char* stringNeedBig, bool setNewValue);
 
+// Insert a new track at the given index. wantDefaults=true makes REAPER
+// apply default-track settings (sane volume, no FX). v0.9.1 uses this to
+// create a fresh track at index 0 when placing newly-imported animations
+// so the user keeps a clean separation between HoloRoll and other tracks.
+using InsertTrackAtIndexFn = void (*)(int idx, bool wantDefaults);
+
 // ---- Project APIs (v0.7.0 project-relative animations folder) -------------
 //
 // EnumProjects(idx, path, sz): returns the ReaProject at idx (-1 = current);
@@ -93,6 +99,9 @@ struct ReaperApi {
   GetMediaItemTakeFn getMediaItemTake = nullptr;
   GetActiveTakeFn getActiveTake = nullptr;
   GetSetMediaItemInfo_StringFn getSetMediaItemInfo_String = nullptr;
+
+  // Track manipulation (v0.9.1 "create new track on top for placements").
+  InsertTrackAtIndexFn insertTrackAtIndex = nullptr;
 
   // Project introspection (v0.7.0 project-relative folders).
   EnumProjectsFn enumProjects = nullptr;
