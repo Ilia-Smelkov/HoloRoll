@@ -109,8 +109,10 @@ class GlViewport {
   void ResetCameraToDefault(const OverlayStatus& status);
 
   // ---- Scene settings (persisted in holoroll_config.ini) -----------------
-  void SetSceneSettings(bool showGround, float radius, float gridStep);
-  void GetSceneSettings(bool* showGround, float* radius, float* gridStep) const;
+  void SetSceneSettings(bool showGround, float radius, float gridStep,
+                        bool showBboxDims, bool showGridLabels, bool showRefHuman);
+  void GetSceneSettings(bool* showGround, float* radius, float* gridStep,
+                        bool* showBboxDims, bool* showGridLabels, bool* showRefHuman) const;
   bool ConsumeSceneDirty();
 
  private:
@@ -133,7 +135,7 @@ class GlViewport {
   void DrawOverlay(double playPositionSeconds,
                    std::uint32_t frameIndex,
                    std::uint32_t totalFrames,
-                   std::size_t vertexCount,
+                   const std::vector<float>& vertices,
                    const OverlayStatus& status);
   // Renders the modal dialog inside the current ImGui frame.
   // Returns: 0 if no choice was made this frame, 1 = Place all, 2 = Skip.
@@ -175,6 +177,15 @@ class GlViewport {
   float groundSize_ = 20.0f;
   float groundGridStep_ = 1.0f;
   bool sceneDirty_ = false;
+
+  // v0.10.0 scale awareness: three opt-in scale aids.
+  //   showBboxDimensions_  - text plate "X x Y x Z m" in viewport corner
+  //   showGridLabels_      - small text labels on major grid intersections
+  //   showReferenceHuman_  - 1.80m stick figure to the right of the model
+  // All persisted via SetSceneSettings/GetSceneSettings to holoroll_config.
+  bool showBboxDimensions_ = true;
+  bool showGridLabels_ = true;
+  bool showReferenceHuman_ = true;
 
   // -------- Input state --------
   POINT lastMousePos_{};

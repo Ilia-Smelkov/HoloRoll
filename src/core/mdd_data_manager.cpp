@@ -1,5 +1,6 @@
 #include "core/mdd_data_manager.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -100,6 +101,33 @@ bool MDDDataManager::LoadFromFile(const std::string& filePath) {
     const std::uint8_t* src = rawCoords.data();
     for (std::size_t i = 0; i < componentsPerFrame; ++i) {
       frame[i] = mdd_endian::ReadBeFloat(src + i * sizeof(float));
+    }
+  }
+
+  // ---- v0.10.0: recenter to origin (XZ only) ------------------------------
+  //
+  // Same idea as in glb_loader.cpp: subtract frame-0 bbox center on X and Z
+  // from every vertex of every frame so the model lands centered on the
+  // grid. Y is left alone so the model still rests above ground.
+  if (totalFrames_ > 0 && totalPoints_ > 0) {
+    const auto& frame0 = frames_[0];
+    float minX = frame0[0], maxX = frame0[0];
+    float minZ = frame0[2], maxZ = frame0[2];
+    for (std::uint32_t v = 1; v < totalPoints_; ++v) {
+      const float x = frame0[v * 3 + 0];
+      const float z = frame0[v * 3 + 2];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    const float dx = 0.5f * (minX + maxX);
+    const float dz = 0.5f * (minZ + maxZ);
+    if (std::abs(dx) > 1e-6f || std::abs(dz) > 1e-6f) {
+      for (auto& frame : frames_) {
+        for (std::uint32_t v = 0; v < totalPoints_; ++v) {
+          frame[v * 3 + 0] -= dx;
+          frame[v * 3 + 2] -= dz;
+        }
+      }
     }
   }
 

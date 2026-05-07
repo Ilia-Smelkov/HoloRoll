@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-05-07
+
+Fixes a real bug: when two REAPER projects sit in the same directory, they
+shared a single `Animations/` folder and could see each other's content.
+Libraries get scoped per-project starting now.
+
+### Changed
+- **Animations folder is now `<project_dir>/Animations/<project_name>/`**,
+  not `<project_dir>/Animations/`. Two `.rpp` files in the same directory
+  produce two completely separate libraries, side by side under one
+  `Animations/` umbrella:
+  ```
+  <project_dir>/
+    MyLevel.rpp
+    BossFight.rpp
+    Animations/
+      MyLevel/      <-- only seen by MyLevel.rpp
+        frog_jump.glb
+      BossFight/    <-- only seen by BossFight.rpp
+        enemy_hit.glb
+  ```
+- The Incoming auto-move pipeline still works: dropped files land in
+  whichever project is currently active, in that project's own subfolder.
+- Drag-n-drop onto the viewport behaves the same way — files end up in
+  the per-project subfolder.
+
+### Migration
+- **Breaking change with no auto-migration.** Existing v0.7–v0.10 projects
+  that relied on `<project_dir>/Animations/` will see an empty library
+  after upgrade. Two ways to recover, pick whichever fits:
+  1. **Move the files**: create `<project_dir>/Animations/<project_name>/`
+     and move the contents of the old `Animations/` into it.
+  2. **Use an override**: hit `Choose folder...` in the overlay and point
+     it at the old shared path. The override is saved into the `.rpp` so
+     it survives reopens. Other projects in the same directory continue
+     using the new layout.
+
+### Internal
+- New helper `ProjectBasenameFromPath` extracts the basename without
+  extension. Used only by `ResolveActiveAnimationsFolder`.
+- `EnsureFolderExists` already recursed into missing parents, so the new
+  two-deep path (`Animations/<name>/`) auto-creates correctly.
+
+## [0.10.0] — 2026-05-07
+
+Scale awareness: models land in the centre of the grid, the viewport tells
+you how big they are, and an optional 2-metre stick figure stands next to
+them for human reference.
+
+### Added
+- **Auto-recentering on load.** Every animation, GLB or MDD, is recentered
+  on its first-frame bbox center (X and Z; Y is left alone so the model
+  still rests on the ground plane). Models that used to appear off to
+  one side of the grid now land in the middle every time, regardless of
+  how the artist set up the export.
+- **Bbox dimensions plate.** A small "X x Y x Z m" label in the top-right
+  corner of the viewport, recomputed every frame from the live skinned
+  bbox. Assumes 1 unit == 1 metre (Blender default). Toggle in the Scene
+  section; on by default. Tooltip explains the unit assumption.
+- **Grid labels.** Number labels (e.g. `1m`, `2m`, `5m`) on every major
+  grid intersection within the visible radius. Anchored to the camera so
+  they stay dense as you fly around. Capped at 64 labels per frame so a
+  huge grid doesn't tank the draw cost. Toggle in Scene; on by default.
+- **1.80-metre reference human.** A translucent grey stick figure (head
+  with eyes and a smile, torso, arms hanging down, legs) drawn 0.5 m to
+  the right of the user's bbox. 1.80 m tall by Vitruvian proportions.
+  Procedurally generated from cylinders — no embedded asset, no extra
+  disk space. Toggle in Scene; on by default.
+- Three new persisted config keys: `scene.show_bbox_dimensions`,
+  `scene.show_grid_labels`, `scene.show_reference_human`. Survive
+  restart and `Reload config`.
+
+### Behaviour
+- Recentering happens once at load time. Per-animation pivot offset slider
+  in the Object section still works on top of the recentered geometry.
+- Reference human is anchored to the **frame-0 bbox edge**, not the live
+  bbox, so it stays put while the animation plays. The model can move
+  around freely; the human stays as a static size yardstick.
+- Multi-animation GLBs are each recentered independently on their own
+  frame 0. Switching between animations may shift the apparent "world"
+  origin, but each animation always starts centered.
+
+### Internal
+- New helpers in `gl_viewport.cpp` (anonymous namespace):
+  `ComputeBboxFromVertices`, `DrawBboxDimensionsImGui`,
+  `DrawGridLabelsImGui`, `DrawStickFigureCylinder`, `DrawReferenceHumanGL`.
+- `GlViewport::SetSceneSettings`/`GetSceneSettings` extended with three
+  new bool parameters; old call sites updated. Config layer mirrors.
+- Recentering pass added at the tail of `GlbLoader::LoadFromFileAtIndex`
+  and `MDDDataManager::LoadFromFile` — both subtract the same XZ offset
+  from every frame so the runtime sees pre-centered geometry. No render
+  path changes.
+
 ## [0.9.1] — 2026-05-07
 
 Two placement fixes that surfaced after v0.9.0 shipped.
@@ -512,7 +605,9 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.10.1
+[0.10.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.10.0
 [0.9.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.9.1
 [0.9.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.9.0
 [0.6.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.6.0

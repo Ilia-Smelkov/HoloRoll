@@ -75,6 +75,12 @@ constexpr char kCfgKeyHotReload[] = "hot_reload.enabled";
 constexpr char kCfgKeySceneShowGround[] = "scene.show_ground_plane";
 constexpr char kCfgKeySceneRadius[]     = "scene.ground_radius";
 constexpr char kCfgKeySceneGridStep[]   = "scene.grid_step";
+// v0.10.0 scale-awareness toggles. All default off-by-default for clean
+// install except bbox dimensions and grid labels which are visually subtle
+// enough that turning them on by default helps new users orient.
+constexpr char kCfgKeySceneShowBboxDims[]   = "scene.show_bbox_dimensions";
+constexpr char kCfgKeySceneShowGridLabels[] = "scene.show_grid_labels";
+constexpr char kCfgKeySceneShowRefHuman[]   = "scene.show_reference_human";
 
 // Default subfolder name for project-relative animations storage. Convention
 // matches game-industry layouts (Animations/ alongside Audio/, Materials/,
@@ -148,6 +154,9 @@ void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeySceneShowGround)) g_config.SetDouble(kCfgKeySceneShowGround, 1.0);
   if (!g_config.Has(kCfgKeySceneRadius))     g_config.SetDouble(kCfgKeySceneRadius, 20.0);
   if (!g_config.Has(kCfgKeySceneGridStep))   g_config.SetDouble(kCfgKeySceneGridStep, 1.0);
+  if (!g_config.Has(kCfgKeySceneShowBboxDims))   g_config.SetDouble(kCfgKeySceneShowBboxDims, 1.0);
+  if (!g_config.Has(kCfgKeySceneShowGridLabels)) g_config.SetDouble(kCfgKeySceneShowGridLabels, 1.0);
+  if (!g_config.Has(kCfgKeySceneShowRefHuman))   g_config.SetDouble(kCfgKeySceneShowRefHuman, 1.0);
 }
 
 // Read the configured region-name prefix and apply it to the AnimationLibrary
@@ -170,7 +179,10 @@ void ApplySceneSettingsToViewport() {
   const bool show     = g_config.GetDouble(kCfgKeySceneShowGround, 1.0) >= 0.5;
   const float radius  = static_cast<float>(g_config.GetDouble(kCfgKeySceneRadius, 20.0));
   const float gridStep = static_cast<float>(g_config.GetDouble(kCfgKeySceneGridStep, 1.0));
-  g_viewport.SetSceneSettings(show, radius, gridStep);
+  const bool bbox     = g_config.GetDouble(kCfgKeySceneShowBboxDims, 1.0) >= 0.5;
+  const bool labels   = g_config.GetDouble(kCfgKeySceneShowGridLabels, 1.0) >= 0.5;
+  const bool refHuman = g_config.GetDouble(kCfgKeySceneShowRefHuman, 1.0) >= 0.5;
+  g_viewport.SetSceneSettings(show, radius, gridStep, bbox, labels, refHuman);
 }
 
 // Pull current scene state from viewport and write it into the config + disk.
@@ -179,10 +191,14 @@ void PersistSceneSettingsFromViewport() {
   bool show = true;
   float radius = 20.0f;
   float gridStep = 1.0f;
-  g_viewport.GetSceneSettings(&show, &radius, &gridStep);
+  bool bbox = true, labels = true, refHuman = false;
+  g_viewport.GetSceneSettings(&show, &radius, &gridStep, &bbox, &labels, &refHuman);
   g_config.SetDouble(kCfgKeySceneShowGround, show ? 1.0 : 0.0);
   g_config.SetDouble(kCfgKeySceneRadius,     static_cast<double>(radius));
   g_config.SetDouble(kCfgKeySceneGridStep,   static_cast<double>(gridStep));
+  g_config.SetDouble(kCfgKeySceneShowBboxDims,   bbox ? 1.0 : 0.0);
+  g_config.SetDouble(kCfgKeySceneShowGridLabels, labels ? 1.0 : 0.0);
+  g_config.SetDouble(kCfgKeySceneShowRefHuman,   refHuman ? 1.0 : 0.0);
   g_config.Save();
 }
 
@@ -227,6 +243,18 @@ std::string DirOfPath(const std::string& fullPath) {
   return pos == std::string::npos ? std::string{} : fullPath.substr(0, pos);
 }
 
+// v0.10.1: extract "<basename>" from `\path\to\<basename>.rpp`. Returns
+// empty if no filename portion. Used to scope the animations folder per
+// project so two .rpps in the same directory don't share the same folder.
+std::string ProjectBasenameFromPath(const std::string& projPath) {
+  if (projPath.empty()) return {};
+  const auto slash = projPath.find_last_of("\\/");
+  const std::string filename = (slash == std::string::npos) ? projPath
+                                                             : projPath.substr(slash + 1);
+  const auto dot = filename.find_last_of('.');
+  return (dot == std::string::npos) ? filename : filename.substr(0, dot);
+}
+
 // Read project-level override for animations folder. Returns empty if no
 // override is set on the active project.
 std::string GetProjectAnimationsOverride() {
@@ -269,6 +297,25 @@ bool EnsureFolderExists(const std::string& path) {
 
 // Resolve the animations folder for the current project state. Returns
 // empty string if no folder is currently usable (Untitled project).
+//
+// v0.10.1 layout: each project gets its own subfolder under a shared
+// `Animations/` directory next to the .rpp:
+//
+//   <project_dir>/
+//     MyLevel.rpp
+//     BossFight.rpp
+//     Animations/
+//       MyLevel/      <-- belongs to MyLevel.rpp
+//         frog_jump.glb
+//       BossFight/    <-- belongs to BossFight.rpp
+//         enemy_hit.glb
+//
+// This isolates assets between projects that share a directory. Replaces
+// the v0.7.0 layout (`<project_dir>/Animations/` shared across all .rpps
+// in the same dir) without backward compatibility — any existing v0.7–v0.10
+// project will see an empty library after upgrade and needs its files
+// moved into the new `Animations/<project_name>/` location, or a manual
+// `Choose folder...` override pointing at the old shared path.
 std::string ResolveActiveAnimationsFolder() {
   // Override always wins, even if the project hasn't been saved yet (the
   // user explicitly pointed Choose folder... somewhere).
@@ -280,7 +327,11 @@ std::string ResolveActiveAnimationsFolder() {
 
   const std::string projDir = DirOfPath(proj);
   if (projDir.empty()) return {};
-  return projDir + "\\" + kProjectAnimationsSubdir;
+
+  const std::string projBasename = ProjectBasenameFromPath(proj);
+  if (projBasename.empty()) return {};
+
+  return projDir + "\\" + kProjectAnimationsSubdir + "\\" + projBasename;
 }
 
 // ---- v0.8.0 Incoming folder + auto-move ----------------------------------

@@ -859,6 +859,46 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
     }
   }
 
+  // ---- v0.10.0: recenter to origin (XZ only, keep Y on the ground) ---------
+  //
+  // Without this step, GLB files with a non-identity mesh node transform
+  // (or non-trivial rest-pose root joint position) end up off-center on
+  // the grid — sometimes way off. We compute the bbox center on frame 0
+  // and subtract its (X, Z) from every vertex of every frame, leaving Y
+  // alone so the model still rests on / above the ground plane.
+  //
+  // Why bbox center and not the root joint world position?
+  //   - Works identically for GLB (skinned) and MDD (point cache); same
+  //     pass is duplicated in mdd_data_manager.cpp.
+  //   - Doesn't depend on rig topology — a Blender export with a weird
+  //     'Armature' parent or a Mixamo rig with multiple top-level joints
+  //     all behave the same.
+  //   - Matches user intent: "put this model in the middle of the grid."
+  //
+  // The user can still fine-tune via the per-animation pivot offset slider
+  // in the overlay, which acts on top of this recentering.
+  if (totalFrames_ > 0 && totalPoints_ > 0) {
+    const auto& frame0 = bakedFrames_[0];
+    float minX = frame0[0], maxX = frame0[0];
+    float minZ = frame0[2], maxZ = frame0[2];
+    for (std::uint32_t v = 1; v < totalPoints_; ++v) {
+      const float x = frame0[v * 3 + 0];
+      const float z = frame0[v * 3 + 2];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    const float dx = 0.5f * (minX + maxX);
+    const float dz = 0.5f * (minZ + maxZ);
+    if (std::abs(dx) > 1e-6f || std::abs(dz) > 1e-6f) {
+      for (auto& frame : bakedFrames_) {
+        for (std::uint32_t v = 0; v < totalPoints_; ++v) {
+          frame[v * 3 + 0] -= dx;
+          frame[v * 3 + 2] -= dz;
+        }
+      }
+    }
+  }
+
   loaded_ = true;
   return true;
 }

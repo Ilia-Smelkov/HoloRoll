@@ -133,6 +133,29 @@ constexpr float kLightDir[3] = {0.4f, 0.85f, 0.35f};
 // other rendering helpers live. Both DrawOverlay and Render call it; this
 // forward decl lets DrawOverlay see it without reordering the file.
 void DrawDropOverlayImGui(const drop_target::DragState& state);
+
+// v0.10.0 scale-awareness helpers. All defined further down; forward-
+// declared here so DrawOverlay can call them.
+//
+// ComputeBboxFromVertices: scan every vertex of the current frame for
+//   min/max XYZ. Cheap (linear, no allocations).
+// DrawBboxDimensionsImGui: render an ImGui plate in the top-right corner
+//   showing "width x height x depth m".
+// DrawGridLabelsImGui: project each major grid intersection within the
+//   visible radius to screen and draw "<n>m" text. Uses MVP matrices that
+//   GlViewport already caches for the gizmo hit-test.
+struct Bbox3 {
+  float minX, minY, minZ;
+  float maxX, maxY, maxZ;
+  bool valid;  // false when vertices is empty
+};
+Bbox3 ComputeBboxFromVertices(const std::vector<float>& vertices);
+void DrawBboxDimensionsImGui(const Bbox3& bbox);
+void DrawGridLabelsImGui(float gridStep, float radius,
+                         float camPosX, float camPosZ,
+                         const float mv[16], const float proj[16],
+                         int viewportW, int viewportH);
+void DrawReferenceHumanGL(float anchorX, float anchorZ);
 }  // namespace
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -853,7 +876,7 @@ void GlViewport::GizmoHitTestAndDrag(const float pivotWorld[3], float screenRadi
 void GlViewport::DrawOverlay(double playPositionSeconds,
                              std::uint32_t frameIndex,
                              std::uint32_t totalFrames,
-                             std::size_t vertexCount,
+                             const std::vector<float>& vertices,
                              const OverlayStatus& status) {
   if (!imguiInitialized_) return;
 
@@ -929,7 +952,7 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   if (ImGui::CollapsingHeader("Playback", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Text("Playhead: %.3f s", playPositionSeconds);
     ImGui::Text("Frame: %u / %u", frameIndex, totalFrames > 0 ? totalFrames - 1 : 0);
-    ImGui::Text("Points: %u", static_cast<unsigned>(vertexCount / 3));
+    ImGui::Text("Points: %u", static_cast<unsigned>(vertices.size() / 3));
     if (smoothedFrameMs_ > 0.0) {
       ImGui::Text("Frame time: %.2f ms (%.1f FPS)", smoothedFrameMs_, 1000.0 / smoothedFrameMs_);
     }
@@ -970,6 +993,21 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     if (ImGui::Checkbox("Show ground plane", &showGroundPlane_)) sceneDirty_ = true;
     if (ImGui::SliderFloat("Visible radius", &groundSize_, 5.0f, 200.0f, "%.0f")) sceneDirty_ = true;
     if (ImGui::SliderFloat("Grid step", &groundGridStep_, 0.05f, 5.0f, "%.2f")) sceneDirty_ = true;
+
+    ImGui::Separator();
+    if (ImGui::Checkbox("Show bbox dimensions", &showBboxDimensions_)) sceneDirty_ = true;
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Top-right plate showing the model's current X x Y x Z size in metres.\n"
+                        "Assumes 1 scene unit == 1 metre (Blender default).");
+    }
+    if (ImGui::Checkbox("Show grid labels", &showGridLabels_)) sceneDirty_ = true;
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Number labels on major grid intersections (every 10 minor steps).");
+    }
+    if (ImGui::Checkbox("Show 1.80m reference", &showReferenceHuman_)) sceneDirty_ = true;
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("1.80-metre stick figure to the right of the model for size reference.");
+    }
   }
 
   if (ImGui::CollapsingHeader("Render", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1005,6 +1043,19 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   // overlay, the modal, and the 3D scene. Cheap when no drag is active
   // (just an atomic load + an if).
   DrawDropOverlayImGui(drop_target::GetDragState());
+
+  // v0.10.0 scale aids: bbox dimensions plate and grid labels. Both opt-in,
+  // both go on the foreground draw list so they sit above the regular
+  // panels but below the drop overlay (drop overlay was drawn last above).
+  if (showBboxDimensions_) {
+    DrawBboxDimensionsImGui(ComputeBboxFromVertices(vertices));
+  }
+  if (showGridLabels_) {
+    DrawGridLabelsImGui(groundGridStep_, groundSize_,
+                        cameraPosX_, cameraPosZ_,
+                        matModelView_, matProjection_,
+                        viewportWidth_, viewportHeight_);
+  }
 
   ImGui::Render();
   ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -1136,6 +1187,269 @@ void DrawDropOverlayImGui(const drop_target::DragState& state) {
                        plateMin.y + (plateH - textSize.y) * 0.5f);
   draw->AddText(textPos, textColor, message);
 }
+
+// v0.10.0: compute axis-aligned bbox of the current frame's vertices.
+// Cheap O(N) scan; called every frame from DrawOverlay (so we can show
+// the live bbox dimensions, which change during animation).
+Bbox3 ComputeBboxFromVertices(const std::vector<float>& vertices) {
+  Bbox3 b{};
+  b.valid = false;
+  if (vertices.size() < 3) return b;
+  b.minX = b.maxX = vertices[0];
+  b.minY = b.maxY = vertices[1];
+  b.minZ = b.maxZ = vertices[2];
+  const std::size_t pointCount = vertices.size() / 3;
+  for (std::size_t i = 1; i < pointCount; ++i) {
+    const float x = vertices[i * 3 + 0];
+    const float y = vertices[i * 3 + 1];
+    const float z = vertices[i * 3 + 2];
+    if (x < b.minX) b.minX = x; else if (x > b.maxX) b.maxX = x;
+    if (y < b.minY) b.minY = y; else if (y > b.maxY) b.maxY = y;
+    if (z < b.minZ) b.minZ = z; else if (z > b.maxZ) b.maxZ = z;
+  }
+  b.valid = true;
+  return b;
+}
+
+// v0.10.0: small "X x Y x Z m" plate in the top-right of the viewport.
+// Sits below the regular HoloRoll panel and the drop overlay (z-order via
+// foreground draw list ordering). Assumes 1 unit == 1 metre, which is
+// Blender's default; comments explain the caveat in the toggle's tooltip.
+void DrawBboxDimensionsImGui(const Bbox3& bbox) {
+  if (!bbox.valid) return;
+  const float w = bbox.maxX - bbox.minX;
+  const float h = bbox.maxY - bbox.minY;
+  const float d = bbox.maxZ - bbox.minZ;
+
+  char buf[96];
+  std::snprintf(buf, sizeof(buf), "%.2f x %.2f x %.2f m", w, h, d);
+
+  ImDrawList* draw = ImGui::GetForegroundDrawList();
+  const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+  const ImVec2 textSize = ImGui::CalcTextSize(buf);
+
+  // Position: top-right, with a small margin. Keep clear of the regular
+  // HoloRoll panel which lives top-left.
+  constexpr float kMargin = 12.0f;
+  constexpr float kPad = 8.0f;
+  const ImVec2 plateMax(displaySize.x - kMargin, kMargin + textSize.y + kPad * 2.0f);
+  const ImVec2 plateMin(plateMax.x - textSize.x - kPad * 2.0f, kMargin);
+  draw->AddRectFilled(plateMin, plateMax, IM_COL32(20, 25, 30, 200), 4.0f);
+  draw->AddRect(plateMin, plateMax, IM_COL32(120, 140, 160, 220), 4.0f, 0, 1.0f);
+
+  const ImVec2 textPos(plateMin.x + kPad, plateMin.y + kPad);
+  draw->AddText(textPos, IM_COL32(220, 230, 240, 255), buf);
+}
+
+// v0.10.0: project major grid intersections to screen and draw small
+// "<n>m" labels at each one. Uses the same major-step logic as
+// DrawGroundPlane (`minorStep * 10`). Skips the origin (where the X/Z
+// axis lines cross) since it's visually self-explanatory.
+void DrawGridLabelsImGui(float gridStep, float radius,
+                         float camPosX, float camPosZ,
+                         const float mv[16], const float proj[16],
+                         int viewportW, int viewportH) {
+  if (gridStep <= 0.0f || viewportW <= 0 || viewportH <= 0) return;
+
+  const float majorStep = gridStep * 10.0f;
+  // Anchor the label grid to the camera so it stays dense as the user
+  // flies around. Match DrawGroundPlane's snap.
+  const float originX = std::floor(camPosX / majorStep) * majorStep;
+  const float originZ = std::floor(camPosZ / majorStep) * majorStep;
+  const int halfSteps = static_cast<int>(std::ceil(radius / majorStep));
+
+  // Cap the number of labels we'll draw per frame so a very wide grid
+  // doesn't murder ImGui with a thousand text quads. Past this, we sparse
+  // out further (every other label).
+  constexpr int kMaxLabels = 64;
+  int labelCount = 0;
+
+  ImDrawList* draw = ImGui::GetForegroundDrawList();
+
+  for (int i = -halfSteps; i <= halfSteps && labelCount < kMaxLabels; ++i) {
+    const float x = originX + static_cast<float>(i) * majorStep;
+    if (std::abs(x) < majorStep * 0.5f) continue;  // skip origin
+    const float worldXYZ[3] = {x, 0.0f, originZ};
+    float sx, sy;
+    if (!ProjectToScreen(worldXYZ, mv, proj, viewportW, viewportH, &sx, &sy)) continue;
+    if (sx < 0 || sy < 0 || sx > viewportW || sy > viewportH) continue;
+
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%dm", static_cast<int>(std::round(x)));
+    draw->AddText(ImVec2(sx + 3, sy + 3), IM_COL32(180, 200, 220, 220), buf);
+    ++labelCount;
+  }
+  for (int i = -halfSteps; i <= halfSteps && labelCount < kMaxLabels; ++i) {
+    const float z = originZ + static_cast<float>(i) * majorStep;
+    if (std::abs(z) < majorStep * 0.5f) continue;
+    const float worldXYZ[3] = {originX, 0.0f, z};
+    float sx, sy;
+    if (!ProjectToScreen(worldXYZ, mv, proj, viewportW, viewportH, &sx, &sy)) continue;
+    if (sx < 0 || sy < 0 || sx > viewportW || sy > viewportH) continue;
+
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%dm", static_cast<int>(std::round(z)));
+    draw->AddText(ImVec2(sx + 3, sy + 3), IM_COL32(180, 200, 220, 220), buf);
+    ++labelCount;
+  }
+}
+// v0.10.0: render a 2-metre tall stick figure made of cylinders, used as a
+// scale reference next to the user's model. Drawn in immediate mode (slow
+// in principle but cheap in practice — ~50 quads). Positioned at
+// (anchorX, 0, anchorZ) with feet on the ground; faces +Z by convention.
+//
+// Pure OpenGL legacy. Doesn't use the VBO/EBO path — immediate mode is
+// fine for this many quads, and threading it through the regular DrawScene
+// pipeline would mean inventing a second mesh format.
+void DrawStickFigureCylinder(float x0, float y0, float z0,
+                             float x1, float y1, float z1,
+                             float radius, int segments,
+                             float r, float g, float b, float a) {
+  // Direction & length.
+  const float dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
+  const float length = std::sqrt(dx*dx + dy*dy + dz*dz);
+  if (length < 1e-6f) return;
+
+  // Build an orthonormal basis around the cylinder axis (dir, perp1, perp2).
+  const float invLen = 1.0f / length;
+  const float ax = dx * invLen, ay = dy * invLen, az = dz * invLen;
+  // Pick a 'tmp' vector not parallel to axis.
+  float tx = (std::abs(ay) < 0.9f) ? 0.0f : 1.0f;
+  float ty = (std::abs(ay) < 0.9f) ? 1.0f : 0.0f;
+  float tz = 0.0f;
+  // perp1 = normalize(cross(axis, tmp))
+  float p1x = ay*tz - az*ty;
+  float p1y = az*tx - ax*tz;
+  float p1z = ax*ty - ay*tx;
+  const float p1len = std::sqrt(p1x*p1x + p1y*p1y + p1z*p1z);
+  if (p1len < 1e-6f) return;
+  p1x /= p1len; p1y /= p1len; p1z /= p1len;
+  // perp2 = cross(axis, perp1)
+  const float p2x = ay*p1z - az*p1y;
+  const float p2y = az*p1x - ax*p1z;
+  const float p2z = ax*p1y - ay*p1x;
+
+  glColor4f(r, g, b, a);
+  glBegin(GL_QUAD_STRIP);
+  for (int i = 0; i <= segments; ++i) {
+    const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * kPi;
+    const float c = std::cos(t) * radius;
+    const float s = std::sin(t) * radius;
+    const float ox = p1x * c + p2x * s;
+    const float oy = p1y * c + p2y * s;
+    const float oz = p1z * c + p2z * s;
+    glVertex3f(x0 + ox, y0 + oy, z0 + oz);
+    glVertex3f(x1 + ox, y1 + oy, z1 + oz);
+  }
+  glEnd();
+}
+
+void DrawReferenceHumanGL(float anchorX, float anchorZ) {
+  // 1.80-metre tall stick figure with arms-down pose. Proportions roughly
+  // Vitruvian, scaled to 1.80 m total height:
+  //   head    0.225 m diameter, top at 1.80 m
+  //   torso   from 0.90 m to 1.53 m
+  //   legs    from 0.0 m to 0.90 m, separated by 0.20 m
+  //   arms    hanging down from shoulder (1.48 m) to wrist (0.78 m)
+  // Faces +Z (toward the user's model since we position it on the +X side).
+
+  const float headTop     = 1.80f;
+  const float headBottom  = 1.575f;  // 0.225 m head
+  const float headRadius  = 0.1125f;
+  const float headCenterY = 0.5f * (headTop + headBottom);
+  const float torsoTop    = 1.53f;
+  const float torsoBottom = 0.90f;
+  const float armRadius   = 0.045f;
+  const float legRadius   = 0.063f;
+  const float torsoRadius = 0.108f;
+
+  // Translucent grey so the eye reads it as "reference" not "foreground".
+  constexpr float r = 0.55f, g = 0.60f, b = 0.65f, a = 0.65f;
+
+  glEnable(kGL_BLEND);
+  glBlendFunc(kGL_SRC_ALPHA, kGL_ONE_MINUS_SRC_ALPHA);
+  glDepthMask(GL_FALSE);  // don't write depth so the model still sorts in front when overlapping
+
+  // Head (vertical capsule simplified to a short cylinder).
+  DrawStickFigureCylinder(anchorX, headBottom, anchorZ,
+                          anchorX, headTop,    anchorZ,
+                          headRadius, 16, r, g, b, a);
+
+  // Torso.
+  DrawStickFigureCylinder(anchorX, torsoBottom, anchorZ,
+                          anchorX, torsoTop,    anchorZ,
+                          torsoRadius, 16, r, g, b, a);
+
+  // Arms hanging down from shoulders. Shoulder at top of torso, slightly
+  // offset outward so the arms don't visually merge with the torso
+  // cylinder. Wrists hang to about hip level (~0.80 m).
+  const float shoulderY = torsoTop - 0.05f;
+  const float wristY    = 0.78f;
+  const float shoulderXOffset = torsoRadius + armRadius * 0.5f;
+  // Left arm.
+  DrawStickFigureCylinder(anchorX - shoulderXOffset, shoulderY, anchorZ,
+                          anchorX - shoulderXOffset, wristY,    anchorZ,
+                          armRadius, 12, r, g, b, a);
+  // Right arm.
+  DrawStickFigureCylinder(anchorX + shoulderXOffset, shoulderY, anchorZ,
+                          anchorX + shoulderXOffset, wristY,    anchorZ,
+                          armRadius, 12, r, g, b, a);
+
+  // Legs.
+  DrawStickFigureCylinder(anchorX - 0.10f, 0.0f,        anchorZ,
+                          anchorX - 0.10f, torsoBottom, anchorZ,
+                          legRadius, 12, r, g, b, a);
+  DrawStickFigureCylinder(anchorX + 0.10f, 0.0f,        anchorZ,
+                          anchorX + 0.10f, torsoBottom, anchorZ,
+                          legRadius, 12, r, g, b, a);
+
+  // ---- Face: eyes + smile -------------------------------------------------
+  //
+  // Drawn on the +Z side of the head (model-facing). Pure point/line
+  // primitives so we don't build geometry. Slightly offset out from the
+  // head surface so they don't z-fight with the head cylinder.
+  //
+  // We disable depth test for the face so it always wins against the head
+  // even if rounding pushes them to the same depth.
+  glDisable(GL_DEPTH_TEST);
+
+  const float facePlaneZ = anchorZ + headRadius + 0.005f;  // a hair in front
+  const float eyeY       = headCenterY + headRadius * 0.30f;
+  const float eyeOffsetX = headRadius * 0.40f;
+  const float smileY     = headCenterY - headRadius * 0.25f;
+  const float smileHalfW = headRadius * 0.40f;
+  const float smileDip   = headRadius * 0.20f;
+
+  // Eyes (two solid dots).
+  glColor4f(0.10f, 0.12f, 0.14f, std::min(1.0f, a + 0.30f));
+  glPointSize(5.0f);
+  glBegin(GL_POINTS);
+  glVertex3f(anchorX - eyeOffsetX, eyeY, facePlaneZ);
+  glVertex3f(anchorX + eyeOffsetX, eyeY, facePlaneZ);
+  glEnd();
+  glPointSize(1.0f);
+
+  // Smile (downward arc, sampled). Drawn as a line strip; line width 2 to
+  // make it readable at the small head size.
+  glLineWidth(2.0f);
+  glBegin(GL_LINE_STRIP);
+  constexpr int kSmileSamples = 12;
+  for (int i = 0; i <= kSmileSamples; ++i) {
+    const float t  = static_cast<float>(i) / static_cast<float>(kSmileSamples);  // 0..1
+    const float u  = t * 2.0f - 1.0f;  // -1..1
+    const float sx = anchorX + u * smileHalfW;
+    // Parabola dipping down at the centre, returning at the corners.
+    const float sy = smileY - smileDip * (1.0f - u * u);
+    glVertex3f(sx, sy, facePlaneZ);
+  }
+  glEnd();
+  glLineWidth(1.0f);
+
+  glEnable(GL_DEPTH_TEST);
+  glDepthMask(GL_TRUE);
+  glDisable(kGL_BLEND);
+}
+
 }  // namespace
 
 void GlViewport::Render(const std::vector<float>& vertices,
@@ -1245,8 +1559,26 @@ void GlViewport::Render(const std::vector<float>& vertices,
   }
 
   DrawScene(vertices, triangleIndices, playPositionSeconds, status);
+
+  // v0.10.0: 1.80-metre reference human, drawn after the user's mesh so it
+  // overlaps cleanly. Anchored to the FRAME-0 bbox edge — not the current
+  // frame's bbox — so the human stays still while the animation plays.
+  // Otherwise it jitters/follows the user's model around as the bbox shifts
+  // each frame, which defeats the whole point of a static size reference.
+  if (showReferenceHuman_) {
+    // status.autoPivot is the frame-0 bbox centre; autoExtent is the frame-0
+    // diameter. The right edge of the model is therefore pivot.x + extent/2.
+    // Half-extent overestimates X width when the model is taller than wide,
+    // but that's harmless: the human just sits a bit further out, never on
+    // top of the model.
+    const float halfExtent = std::max(0.1f, status.autoExtent * 0.5f);
+    const float anchorX = status.autoPivot[0] + halfExtent + 0.5f;
+    const float anchorZ = status.autoPivot[2];
+    DrawReferenceHumanGL(anchorX, anchorZ);
+  }
+
   DrawGizmo(pivotWorld, gizmoRadiusWorld);
-  DrawOverlay(playPositionSeconds, frameIndex, totalFrames, vertices.size(), status);
+  DrawOverlay(playPositionSeconds, frameIndex, totalFrames, vertices, status);
   SwapBuffers(hdc_);
 }
 
@@ -1301,16 +1633,24 @@ void GlViewport::CapturePose(ViewportPose& out) const {
 
 // ---- Persisted scene settings API ------------------------------------------
 
-void GlViewport::SetSceneSettings(bool showGround, float radius, float gridStep) {
+void GlViewport::SetSceneSettings(bool showGround, float radius, float gridStep,
+                                  bool showBboxDims, bool showGridLabels, bool showRefHuman) {
   showGroundPlane_ = showGround;
   groundSize_ = radius;
   groundGridStep_ = gridStep;
+  showBboxDimensions_ = showBboxDims;
+  showGridLabels_ = showGridLabels;
+  showReferenceHuman_ = showRefHuman;
 }
 
-void GlViewport::GetSceneSettings(bool* showGround, float* radius, float* gridStep) const {
+void GlViewport::GetSceneSettings(bool* showGround, float* radius, float* gridStep,
+                                  bool* showBboxDims, bool* showGridLabels, bool* showRefHuman) const {
   if (showGround) *showGround = showGroundPlane_;
   if (radius) *radius = groundSize_;
   if (gridStep) *gridStep = groundGridStep_;
+  if (showBboxDims) *showBboxDims = showBboxDimensions_;
+  if (showGridLabels) *showGridLabels = showGridLabels_;
+  if (showRefHuman) *showRefHuman = showReferenceHuman_;
 }
 
 bool GlViewport::ConsumeSceneDirty() {
