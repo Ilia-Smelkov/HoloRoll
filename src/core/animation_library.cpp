@@ -114,6 +114,56 @@ void ComputeRestNormals(LoadedAnimation& anim) {
     anim.restNormals[t * 3 + 2] = nz;
   }
 }
+
+// Copy motion analysis data (joint names + per-frame world motion magnitude)
+// from the loaded GlbLoader into the LoadedAnimation. v0.12.0-alpha.1: only
+// world motion is populated; localMotion stays empty for now (planned for
+// alpha.2). MDD animations have no skeleton, so this is a no-op for them.
+void CopyMotionDataFromGlb(LoadedAnimation& anim) {
+  if (!anim.glb || !anim.glb->IsLoaded()) return;
+  anim.jointNames = anim.glb->JointNames();
+  anim.worldMotion = anim.glb->WorldMotion();
+  anim.localMotion = anim.glb->LocalMotion();  // currently zero-filled, see GlbLoader.
+}
+
+// Format a single-line summary of the top-3 most-active joints (by total
+// world-motion sum across the animation). Returns something like:
+//   "top: Bip01 R Hand=12.3, Bip01 L Hand=11.8, Bip01 Head=4.2"
+// or an empty string if there's no skeleton or all joints are static.
+std::string SummarizeTopActiveBones(const LoadedAnimation& anim, std::size_t topN = 3) {
+  if (anim.jointNames.empty() || anim.worldMotion.empty()) return {};
+
+  struct Pair { std::size_t idx; float total; };
+  std::vector<Pair> rank;
+  rank.reserve(anim.jointNames.size());
+  for (std::size_t j = 0; j < anim.jointNames.size(); ++j) {
+    float sum = 0.0f;
+    for (float v : anim.worldMotion[j]) sum += v;
+    rank.push_back({j, sum});
+  }
+  std::partial_sort(rank.begin(),
+                    rank.begin() + std::min(topN, rank.size()),
+                    rank.end(),
+                    [](const Pair& a, const Pair& b) { return a.total > b.total; });
+
+  std::string out = "top: ";
+  bool first = true;
+  for (std::size_t k = 0; k < std::min(topN, rank.size()); ++k) {
+    // Show all top-N entries even if total is 0 — a static bone in the
+    // ranking is informative ("this rig has 18 joints but only 3 actually
+    // move"). Only suppress trailing zero-motion entries below an outright
+    // numerical-noise threshold.
+    if (rank[k].total < 1e-6f) break;
+    if (!first) out += ", ";
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s=%.3f", anim.jointNames[rank[k].idx].c_str(),
+                  rank[k].total);
+    out += buf;
+    first = false;
+  }
+  if (first) return {};  // nothing meaningful to report
+  return out;
+}
 }  // namespace
 
 // ---- Static state -----------------------------------------------------------
@@ -384,10 +434,14 @@ std::size_t AnimationLibrary::ScanFolder(const std::string& directory,
 
       ComputeRestPoseBoundingBox(*entry);
       ComputeRestNormals(*entry);
+      CopyMotionDataFromGlb(*entry);
 
+      const std::string motionTop = SummarizeTopActiveBones(*entry);
       Append(logOut, "[AnimationLibrary] loaded GLB '" + entry->basename + "' (frames=" +
                          std::to_string(entry->glb->TotalFrames()) + ", points=" +
-                         std::to_string(entry->glb->TotalPoints()) + ")");
+                         std::to_string(entry->glb->TotalPoints()) + ", joints=" +
+                         std::to_string(entry->jointNames.size()) +
+                         (motionTop.empty() ? "" : "; " + motionTop) + ")");
       animations_.push_back(std::move(entry));
     }
   }

@@ -36,6 +36,33 @@ struct LoadedAnimation {
   // Per-triangle face normals computed from the rest pose (frame 0).
   std::vector<float> restNormals;
 
+  // ---- v0.12.0 motion analysis ------------------------------------------
+  //
+  // Per-bone motion magnitude curves, computed at load time. Two metrics:
+  //
+  //   localMotion[j][f]  - magnitude of bone j's LOCAL transform change
+  //                        from frame f-1 to f. Captures "this bone
+  //                        actually started moving" semantics: a child
+  //                        of a rotating parent has localMotion = 0 even
+  //                        though its world position is changing. Use this
+  //                        to find first-mover bones (handle vs door body).
+  //
+  //   worldMotion[j][f]  - magnitude of bone j's WORLD position change
+  //                        from frame f-1 to f. Captures "how much the
+  //                        bone moved in world" semantics: a foot bone
+  //                        with fixed local rotation but a swinging hip
+  //                        parent will have non-zero worldMotion. Use
+  //                        this to find biggest amplitude bones for sound
+  //                        timing.
+  //
+  // Frame 0 always has motion = 0 (no previous frame). Both curves are
+  // empty for MDD animations (no skeleton). Joint name comes from the
+  // skin.joints[j].name field in the glTF; falls back to "joint_<idx>"
+  // if unnamed.
+  std::vector<std::string> jointNames;
+  std::vector<std::vector<float>> localMotion;
+  std::vector<std::vector<float>> worldMotion;
+
   double DurationSeconds(double fps) const;
 
   // Source-agnostic accessors. Always prefer these over poking at

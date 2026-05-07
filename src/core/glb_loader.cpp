@@ -739,6 +739,31 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
   totalFrames_ = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(std::round(duration * fps)));
   bakedFrames_.assign(totalFrames_, std::vector<float>(totalPoints_ * 3, 0.0f));
 
+  // ---- v0.12.0 motion analysis: allocate per-joint curves -----------------
+  //
+  // worldMotion_[j][f] = Euclidean distance moved by joint j between frames
+  // f-1 and f (in pre-recenter world space; the recenter pass below is a
+  // global constant offset, so it doesn't affect frame-to-frame deltas).
+  //
+  // Frame 0 is always 0 (no previous). We track previous-frame world
+  // positions in `prevJointWorldPos` to avoid storing all per-frame world
+  // matrices.
+  jointNames_.clear();
+  jointNames_.reserve(jointCount);
+  for (std::size_t j = 0; j < jointCount; ++j) {
+    const int n = skin.joints[j];
+    const std::string& nm = (n >= 0 && n < static_cast<int>(model.nodes.size()))
+                                ? model.nodes[n].name
+                                : std::string{};
+    jointNames_.push_back(nm.empty() ? ("joint_" + std::to_string(j)) : nm);
+  }
+  worldMotion_.assign(jointCount, std::vector<float>(totalFrames_, 0.0f));
+  // Local motion not implemented in v0.12.0-alpha.1 — placeholder so the
+  // surface API stays consistent.
+  localMotion_.assign(jointCount, std::vector<float>(totalFrames_, 0.0f));
+
+  std::vector<Vec3> prevJointWorldPos(jointCount, Vec3{0, 0, 0});
+
   // ---- Per-frame baking loop ------------------------------------------------
   // Reusable scratch buffers (avoid allocating per frame).
   std::vector<NodeBaseTRS> currentTRS(model.nodes.size());
@@ -826,6 +851,37 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
     for (std::size_t j = 0; j < jointCount; ++j) {
       const int n = skin.joints[j];
       jointSkin[j] = MulM(nodeWorld[n], ibms[j]);
+    }
+
+    // ---- v0.12.0: per-joint world-motion magnitude --------------------
+    //
+    // For each joint, transform a fixed point in joint-local space through
+    // its current world matrix and diff against the previous frame. We use
+    // the local-space point (0, 1, 0, 1) — i.e. "1 unit up the bone" — so
+    // that rotation-only animations (where joint translation column doesn't
+    // change) still register motion. A pure-rotation joint will swing this
+    // probe point around its origin, which is exactly what "the bone is
+    // moving" means in practice.
+    //
+    // Why not just use the translation column (m[12..14])? RiggedSimple
+    // and most character rigs animate via local rotation only — the
+    // joint's own translation never changes — so a translation-only
+    // metric reports zero motion even when the rig is clearly bending.
+    //
+    // Frame 0 stays at 0 (no previous data); we still capture the probe
+    // position into prevJointWorldPos so frame 1's delta is correct.
+    constexpr Vec4 kProbePoint = {0.0f, 1.0f, 0.0f, 1.0f};
+    for (std::size_t j = 0; j < jointCount; ++j) {
+      const int n = skin.joints[j];
+      const Vec4 probeWorld = MulMV(nodeWorld[n], kProbePoint);
+      const Vec3 cur = {probeWorld[0], probeWorld[1], probeWorld[2]};
+      if (f > 0) {
+        const float dx = cur[0] - prevJointWorldPos[j][0];
+        const float dy = cur[1] - prevJointWorldPos[j][1];
+        const float dz = cur[2] - prevJointWorldPos[j][2];
+        worldMotion_[j][f] = std::sqrt(dx * dx + dy * dy + dz * dz);
+      }
+      prevJointWorldPos[j] = cur;
     }
 
     // Skin every vertex.

@@ -26,6 +26,13 @@ using DockWindowAddExFn = void (*)(HWND hwnd, const char* name, const char* iden
 using DockWindowRemoveFn = void (*)(HWND hwnd);
 using DockWindowActivateFn = void (*)(HWND hwnd);
 
+// Read the toggle-state of an action. Returns 1 if the toggle is ON,
+// 0 if OFF, -1 if the action doesn't have a toggle state. Used in
+// v0.12.0-alpha.1 to check whether REAPER's console window is currently
+// open before issuing the toggle action 40078 (so we don't accidentally
+// close it).
+using GetToggleCommandStateFn = int (*)(int command_id);
+
 // ---- Track / item / take APIs (used for spike: create empty item on a track) -----------
 //
 // MediaTrack and MediaItem / MediaItem_Take are opaque pointer types defined
@@ -81,6 +88,7 @@ struct ReaperApi {
   DockWindowAddExFn dockWindowAddEx = nullptr;
   DockWindowRemoveFn dockWindowRemove = nullptr;
   DockWindowActivateFn dockWindowActivate = nullptr;
+  GetToggleCommandStateFn getToggleCommandState = nullptr;
 
   // Track / item / take (spike for v0.6.0 items model).
   GetSelectedTrackFn getSelectedTrack = nullptr;

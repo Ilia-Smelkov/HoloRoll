@@ -161,6 +161,27 @@ void SpikeLog(const std::string& msg) {
   if (g_bridge.Api().showConsoleMsg) g_bridge.Api().showConsoleMsg(msg.c_str());
 }
 
+// v0.12.0-alpha.1: force the REAPER console window to be visible so the
+// user can see motion-analysis sanity-check output even if they had the
+// console hidden from a previous session. Action 40078 is REAPER's native
+// "View: Show console output" command — it's a toggle, so we only call it
+// when the console isn't already visible (otherwise we'd close it).
+//
+// Action ID 40078 is a built-in REAPER command. GetToggleCommandState
+// returns 1 when the console is open, 0 when closed, -1 if the action
+// doesn't have toggle state. We only fire on 0. If GetToggleCommandState
+// is unavailable in the resolved API (very old REAPER), we skip the
+// auto-show entirely — better than risking a close.
+void ForceShowReaperConsole() {
+  const auto& api = g_bridge.Api();
+  if (!api.mainOnCommand || !api.getToggleCommandState) return;
+  const int state = api.getToggleCommandState(40078);
+  if (state == 0) {
+    // Console is currently closed — toggle it open.
+    api.mainOnCommand(40078, 0);
+  }
+}
+
 void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeyFps)) g_config.SetDouble(kCfgKeyFps, kDefaultFps);
   if (!g_config.Has(kCfgKeyGap)) g_config.SetDouble(kCfgKeyGap, kDefaultGapSeconds);
@@ -608,7 +629,15 @@ void RebuildLibraryAndRegions(const std::string& /*ignored*/) {
   std::string log;
   const std::size_t loaded = g_lib.ScanFolder(dir, GetFps(), &log);
   g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
-  if (!log.empty()) ConsoleLog(log);
+  // v0.12.0-alpha.1: scan log includes per-animation "top active bones"
+  // summaries. Surface to console (always-on) so the user can sanity-check
+  // motion data on freshly-loaded files. Will move to overlay UI in alpha.2.
+  if (!log.empty()) {
+    SpikeLog(log);
+    // Force REAPER's console window open so the motion summary is
+    // immediately visible. Safe even if user had the console hidden.
+    ForceShowReaperConsole();
+  }
   ConsoleLog("[holoroll] library: " + std::to_string(loaded) +
              " animation(s), " + std::to_string(g_lib.Regions().size()) + " region(s) prepared.\n");
 

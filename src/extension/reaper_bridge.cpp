@@ -20,6 +20,10 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.dockWindowRemove = reinterpret_cast<DockWindowRemoveFn>(rec->GetFunc("DockWindowRemove"));
   api.dockWindowActivate = reinterpret_cast<DockWindowActivateFn>(rec->GetFunc("DockWindowActivate"));
 
+  // v0.12.0-alpha.1: GetToggleCommandState lets us check console-window
+  // visibility before issuing the toggle action 40078.
+  api.getToggleCommandState = reinterpret_cast<GetToggleCommandStateFn>(rec->GetFunc("GetToggleCommandState"));
+
   // Track / item / take APIs (v0.6.0 items spike). All optional — if any is
   // missing, the spike button will report a useful error.
   api.getSelectedTrack = reinterpret_cast<GetSelectedTrackFn>(rec->GetFunc("GetSelectedTrack"));

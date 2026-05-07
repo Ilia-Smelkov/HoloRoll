@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.1] — 2026-05-07
+
+First pre-release toward v0.12.0 motion analysis. Lays the foundation:
+per-bone world-motion magnitude is computed at GLB load time and surfaced
+as a console summary, so we can sanity-check the data on real animations
+before wiring it into UI / native REAPER envelopes.
+
+This is a pre-release. Local motion, overlay UI, and envelope integration
+are planned for subsequent alphas.
+
+### Added
+- **Per-bone world-motion computation.** Every GLB animation now produces
+  a `worldMotion[joint][frame]` curve at load time — the Euclidean
+  distance each joint's world position travelled between consecutive
+  frames. Frame 0 is always 0 (no previous frame). The curve captures
+  inherited motion: a foot bone whose hip parent rotates will show large
+  world motion even if the foot's local transform is fixed.
+- **Joint-name passthrough.** `LoadedAnimation::jointNames` now mirrors
+  `skin.joints[].name` from the glTF, with `joint_<index>` fallback for
+  unnamed channels.
+- **Top-3 most-active bones in the load log.** The library scan log now
+  includes a per-animation summary of the three joints with the highest
+  total world-motion. Surfaced via `SpikeLog` so it's visible in REAPER's
+  console without flipping the verbose-log constant. Format:
+  `joints=N; top: BoneA=12.345, BoneB=11.812, BoneC=4.231`.
+  Quick sanity-check that the data is plausible (e.g. on a walk cycle,
+  feet/hands should dominate; on a door-open animation, the handle bone
+  and door-body bone should appear).
+
+### Internal
+- New fields in `GlbLoader` (and matching getters `JointNames` /
+  `LocalMotion` / `WorldMotion`): `jointNames_`, `localMotion_`,
+  `worldMotion_`. `localMotion_` is allocated and zero-filled in this
+  alpha — the actual local-TRS-delta computation lands in alpha.2.
+- New fields in `LoadedAnimation`: `jointNames`, `localMotion`,
+  `worldMotion`. Populated from the GLB after load via
+  `CopyMotionDataFromGlb` (anonymous helper in `animation_library.cpp`).
+- `SummarizeTopActiveBones` (anonymous helper) computes the top-N
+  ranking by sum-of-world-motion across all frames and formats it as a
+  single-line summary.
+- World-motion magnitudes are computed inside the existing per-frame
+  bake loop in `GlbLoader::LoadFromFileAtIndex`, reusing the already-
+  computed `nodeWorld[skin.joints[j]]` translation column. No extra
+  passes; the cost is one `std::sqrt` per joint per frame.
+- Recentering (the v0.10.0 XZ origin pass) runs *after* motion
+  computation. Since recentering is a constant offset, frame-to-frame
+  deltas are unaffected — the order doesn't matter, but capturing
+  motion before recentering keeps the math obvious.
+
+### Not yet (alpha.2+)
+- Local motion (TRS delta vs previous frame, captures "this bone
+  initiated motion" semantics).
+- Overlay "Motion" section with multi-line ImGui plot, top-N selector
+  with group-diversity filter, local/world toggle, vertical playhead
+  indicator.
+- Native REAPER envelope integration (Track FX placeholder JSFX).
+- Marker generation with threshold tuning.
+
+
 ## [0.11.1] — 2026-05-07
 
 Refines the v0.11.0 placement semantics after testing. Items now stay
@@ -725,7 +784,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.1...HEAD
+[0.12.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.1
 [0.11.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.11.1
 [0.11.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.11.0
 [0.10.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.10.1

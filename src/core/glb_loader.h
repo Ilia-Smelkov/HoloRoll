@@ -67,6 +67,17 @@ class GlbLoader {
   // glTF channel had no `name` field.
   const std::string& AnimationName() const { return animationName_; }
 
+  // ---- v0.12.0 motion analysis -----------------------------------------
+  //
+  // Per-bone motion data computed during the bake pass. Same semantics as
+  // documented in animation_library.h's LoadedAnimation — see there.
+  //
+  // jointNames.size() == localMotion.size() == worldMotion.size() == jointCount.
+  // Each inner vector has length TotalFrames().
+  const std::vector<std::string>& JointNames() const { return jointNames_; }
+  const std::vector<std::vector<float>>& LocalMotion() const { return localMotion_; }
+  const std::vector<std::vector<float>>& WorldMotion() const { return worldMotion_; }
+
  private:
   bool loaded_ = false;
   std::string lastError_;
@@ -80,4 +91,9 @@ class GlbLoader {
 
   // Triangle indices into the per-frame vertex buffer. Stable across frames.
   std::vector<std::uint32_t> triangleIndices_;
+
+  // v0.12.0: motion curves, populated alongside bakedFrames_.
+  std::vector<std::string> jointNames_;
+  std::vector<std::vector<float>> localMotion_;
+  std::vector<std::vector<float>> worldMotion_;
 };
