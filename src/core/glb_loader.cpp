@@ -758,11 +758,15 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
     jointNames_.push_back(nm.empty() ? ("joint_" + std::to_string(j)) : nm);
   }
   worldMotion_.assign(jointCount, std::vector<float>(totalFrames_, 0.0f));
-  // Local motion not implemented in v0.12.0-alpha.1 — placeholder so the
-  // surface API stays consistent.
+  // v0.12.0-alpha.2: local motion now computed alongside world motion.
+  // See the bake loop below for the per-frame computation.
   localMotion_.assign(jointCount, std::vector<float>(totalFrames_, 0.0f));
 
   std::vector<Vec3> prevJointWorldPos(jointCount, Vec3{0, 0, 0});
+  // Same idea but in parent-local space — captures "this bone moved
+  // relative to its parent", which is what we want for first-mover
+  // detection (handle rotates while door body is still).
+  std::vector<Vec3> prevJointLocalProbe(jointCount, Vec3{0, 0, 0});
 
   // ---- Per-frame baking loop ------------------------------------------------
   // Reusable scratch buffers (avoid allocating per frame).
@@ -853,35 +857,60 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
       jointSkin[j] = MulM(nodeWorld[n], ibms[j]);
     }
 
-    // ---- v0.12.0: per-joint world-motion magnitude --------------------
+    // ---- v0.12.0: per-joint motion magnitude --------------------------
     //
-    // For each joint, transform a fixed point in joint-local space through
-    // its current world matrix and diff against the previous frame. We use
-    // the local-space point (0, 1, 0, 1) — i.e. "1 unit up the bone" — so
-    // that rotation-only animations (where joint translation column doesn't
-    // change) still register motion. A pure-rotation joint will swing this
-    // probe point around its origin, which is exactly what "the bone is
-    // moving" means in practice.
+    // Two metrics, both using the same probe-point trick:
     //
-    // Why not just use the translation column (m[12..14])? RiggedSimple
-    // and most character rigs animate via local rotation only — the
-    // joint's own translation never changes — so a translation-only
-    // metric reports zero motion even when the rig is clearly bending.
+    //   World motion: probe (0,1,0) transformed through nodeWorld[j].
+    //     Captures absolute motion of the bone tip in world space —
+    //     including motion inherited from parent rotations. A foot bone
+    //     with fixed local rotation but a swinging hip parent shows
+    //     non-zero world motion.
     //
-    // Frame 0 stays at 0 (no previous data); we still capture the probe
-    // position into prevJointWorldPos so frame 1's delta is correct.
+    //   Local motion: probe (0,1,0) transformed through ONLY the joint's
+    //     own local TRS (no parent chain). Captures motion relative to
+    //     the parent — i.e. "this joint actually started moving on its
+    //     own." A child whose parent rotates but whose own local TRS is
+    //     fixed shows zero local motion (correct: it's not moving by its
+    //     own action, it's being carried by the parent).
+    //
+    // Why the local probe lives in parent space (not joint-local):
+    //   The joint's local TRS maps from joint-local to parent-local. So
+    //   transforming probe(0,1,0) by the local TRS gives a point in the
+    //   parent's coordinate frame. Diffing across frames in that frame
+    //   isolates the joint's own contribution to motion.
+    //
+    // Frame 0 stays at 0 (no previous data); we still capture both
+    // probe positions so frame 1's deltas are correct.
     constexpr Vec4 kProbePoint = {0.0f, 1.0f, 0.0f, 1.0f};
     for (std::size_t j = 0; j < jointCount; ++j) {
       const int n = skin.joints[j];
+
+      // World probe: full hierarchy applied.
       const Vec4 probeWorld = MulMV(nodeWorld[n], kProbePoint);
-      const Vec3 cur = {probeWorld[0], probeWorld[1], probeWorld[2]};
+      const Vec3 curWorld = {probeWorld[0], probeWorld[1], probeWorld[2]};
+
+      // Local probe: only this joint's own TRS applied. The result lives
+      // in parent space — we never need to convert it anywhere; we just
+      // diff parent-space-to-parent-space across frames.
+      const auto& trs = currentTRS[n];
+      const Mat4 localOnly = ComposeTRS(trs.translation, trs.rotation, trs.scale);
+      const Vec4 probeLocal = MulMV(localOnly, kProbePoint);
+      const Vec3 curLocal = {probeLocal[0], probeLocal[1], probeLocal[2]};
+
       if (f > 0) {
-        const float dx = cur[0] - prevJointWorldPos[j][0];
-        const float dy = cur[1] - prevJointWorldPos[j][1];
-        const float dz = cur[2] - prevJointWorldPos[j][2];
-        worldMotion_[j][f] = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const float dwx = curWorld[0] - prevJointWorldPos[j][0];
+        const float dwy = curWorld[1] - prevJointWorldPos[j][1];
+        const float dwz = curWorld[2] - prevJointWorldPos[j][2];
+        worldMotion_[j][f] = std::sqrt(dwx * dwx + dwy * dwy + dwz * dwz);
+
+        const float dlx = curLocal[0] - prevJointLocalProbe[j][0];
+        const float dly = curLocal[1] - prevJointLocalProbe[j][1];
+        const float dlz = curLocal[2] - prevJointLocalProbe[j][2];
+        localMotion_[j][f] = std::sqrt(dlx * dlx + dly * dly + dlz * dlz);
       }
-      prevJointWorldPos[j] = cur;
+      prevJointWorldPos[j] = curWorld;
+      prevJointLocalProbe[j] = curLocal;
     }
 
     // Skin every vertex.

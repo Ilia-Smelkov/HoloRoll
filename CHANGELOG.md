@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.2] — 2026-05-07
+
+Adds local-motion computation alongside world motion. Both metrics are now
+logged to console at GLB load time, so users can compare which bones are
+"first movers" (high local motion) vs which bones simply inherit motion
+from rotating parents (high world motion, low local motion).
+
+Still no UI — that's alpha.2.b.
+
+### Added
+- **Per-bone local-motion computation.** For each joint, transform a probe
+  point (0,1,0) through the joint's own local TRS only (no parent chain),
+  diff parent-space-to-parent-space across frames. Captures "this joint
+  initiated motion" semantics: a child bone whose parent rotates but whose
+  own local TRS is fixed shows zero local motion, even though its world
+  position is changing.
+- **Two-line console summary** on GLB load:
+  ```
+  loaded GLB 'door_open' (frames=36, points=1280, joints=12;
+      top world: Door_Body=4.532, Door_Handle=4.218, Door_Hinge=2.104;
+      top local: Door_Handle=2.110, Door_Body=1.846, Door_Hinge=0.000)
+  ```
+  The world ranking shows what's visually moving most; the local ranking
+  shows what's actually being driven by animation channels.
+  Quick door-anim sanity check: handle should dominate local before body
+  starts (handle initiates), but in world both end up high (handle inherits
+  body's rotation once body starts swinging).
+
+### Changed
+- `SummarizeTopActiveBones` is now generic over which motion vector to
+  rank — takes a `motion` parameter instead of always using
+  `anim.worldMotion`. Called twice per animation in `ScanFolder` (once
+  for world, once for local).
+
+### Internal
+- New scratch buffer `prevJointLocalProbe` in the bake loop, parallel to
+  `prevJointWorldPos`. Both Vec3 vectors of length jointCount.
+- Local probe uses `ComposeTRS(currentTRS[n].t, .r, .s)` directly — the
+  result lives in the joint's parent coordinate frame, which is exactly
+  what we want for parent-space delta. No conversion to world needed.
+
+
 ## [0.12.0-alpha.1] — 2026-05-07
 
 First pre-release toward v0.12.0 motion analysis. Lays the foundation:
@@ -784,7 +826,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.2...HEAD
+[0.12.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.2
 [0.12.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.1
 [0.11.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.11.1
 [0.11.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.11.0
