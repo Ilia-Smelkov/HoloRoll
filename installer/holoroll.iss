@@ -87,6 +87,13 @@ Source: "payload\{#MyDllName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE";   DestDir: "{app}"; DestName: "HoloRoll-LICENSE.txt"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; DestName: "HoloRoll-README.md";   Flags: ignoreversion
 
+; v0.12.0-alpha.3: bundled JSFX placeholder. The HoloRoll extension
+; inserts this on a dedicated track to host per-bone motion envelopes.
+; Lands in REAPER's Effects/HoloRoll/ folder, NOT next to the DLL
+; (Effects/ and UserPlugins/ are sibling directories under REAPER's
+; resource path). Resolved by DefaultEffectsDir() below.
+Source: "payload\effects\HoloRoll\*"; DestDir: "{code:DefaultEffectsDir}\HoloRoll"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [InstallDelete]
 ; Remove the legacy DLL from the MVP era so users don't end up with two
 ; copies of the plugin loaded by REAPER.
@@ -99,6 +106,10 @@ Filename: "{#MyAppURL}"; Description: "Visit project page"; Flags: postinstall s
 ; Bundled docs we placed next to the DLL.
 Type: files; Name: "{app}\HoloRoll-LICENSE.txt"
 Type: files; Name: "{app}\HoloRoll-README.md"
+; v0.12.0-alpha.3: clean up bundled JSFX folder on uninstall. The folder
+; itself is removed if empty after files are gone. We don't touch user-
+; created JSFX in REAPER's main Effects/ folder — only our own subfolder.
+Type: filesandordirs; Name: "{code:DefaultEffectsDir}\HoloRoll"
 
 [Code]
 
@@ -129,6 +140,36 @@ begin
   end;
 
   Result := ExpandConstant('{userappdata}\REAPER\UserPlugins');
+end;
+
+// --- Default Effects folder discovery --------------------------------------
+//
+// Same logic as DefaultPluginsDir but resolves to REAPER's Effects/
+// directory (sibling of UserPlugins). JSFX go here. We don't probe for
+// existence on the portable path — if portable REAPER is detected, we
+// always use <portable>/Effects/ (it's created automatically by REAPER
+// the first time a user inserts a JSFX, but we may need to create it
+// ourselves on first install).
+function DefaultEffectsDir(Param: string): string;
+var
+  PortableRoot: string;
+  Candidate: string;
+begin
+  Result := '';
+
+  if RegQueryStringValue(HKCU, 'Software\Cockos\REAPER', 'reaperinipath', PortableRoot) then
+  begin
+    if PortableRoot <> '' then
+    begin
+      Candidate := AddBackslash(PortableRoot) + 'Effects';
+      // For portable installs we trust the registry hint even if Effects/
+      // doesn't exist yet — [Files] with createallsubdirs will materialise it.
+      Result := Candidate;
+      Exit;
+    end;
+  end;
+
+  Result := ExpandConstant('{userappdata}\REAPER\Effects');
 end;
 
 // --- REAPER process detection / shutdown -----------------------------------

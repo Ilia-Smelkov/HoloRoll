@@ -9,6 +9,8 @@ param(
   [Parameter(Mandatory = $false)]
   [string]$ReaperUserPluginsDir = (Join-Path $env:APPDATA "REAPER\UserPlugins"),
   [Parameter(Mandatory = $false)]
+  [string]$ReaperEffectsDir = (Join-Path $env:APPDATA "REAPER\Effects"),
+  [Parameter(Mandatory = $false)]
   [switch]$KillReaper,
   [Parameter(Mandatory = $false)]
   [switch]$RestartReaper,
@@ -76,6 +78,23 @@ if ($DeployToReaper) {
   if (Test-Path $legacyDll) {
     Remove-Item $legacyDll -Force -ErrorAction SilentlyContinue
     Write-Host "Removed legacy plugin: $legacyDll"
+  }
+
+  # v0.12.0-alpha.3: also deploy bundled JSFX assets. The HoloRoll
+  # extension inserts these JSFX onto a dedicated track to host per-bone
+  # motion envelopes (REAPER envelopes always need a parameter target,
+  # and JSFX sliders are the cheapest way to provide one). Without this
+  # copy step, REAPER won't see the plugin even after the extension is
+  # loaded.
+  $jsfxSourceDir = Join-Path $PSScriptRoot "..\assets\effects\HoloRoll"
+  $jsfxSourceResolved = Resolve-Path $jsfxSourceDir -ErrorAction SilentlyContinue
+  if ($jsfxSourceResolved) {
+    $jsfxDestDir = Join-Path $ReaperEffectsDir "HoloRoll"
+    New-Item -ItemType Directory -Force -Path $jsfxDestDir | Out-Null
+    Copy-Item -Path (Join-Path $jsfxSourceResolved.Path "*") -Destination $jsfxDestDir -Recurse -Force
+    Write-Host "Deployed JSFX assets to: $jsfxDestDir"
+  } else {
+    Write-Warning "JSFX assets directory not found at '$jsfxSourceDir' -- skipping."
   }
 }
 

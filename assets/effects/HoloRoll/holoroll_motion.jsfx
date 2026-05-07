@@ -1,0 +1,76 @@
+desc:HoloRoll Motion
+tags:utility holoroll
+author:HoloRoll
+//
+// HoloRoll Motion
+// ===============
+//
+// Placeholder JSFX plugin used by the HoloRoll REAPER extension to host
+// per-bone motion-analysis envelopes. It does NOT process audio in any way:
+//   - in_pin:none  -> no audio inputs
+//   - out_pin:none -> no audio outputs
+// REAPER recognises this and skips the whole plugin during audio rendering,
+// so it costs nothing on the audio thread.
+//
+// Why this exists
+// ---------------
+// REAPER envelopes always live on a parameter (track volume/pan/mute, send
+// level, or FX parameter). There is no such thing as a "free-floating"
+// envelope. To surface bone motion curves on the timeline as REAPER's
+// native automation, HoloRoll inserts this plugin on a dedicated track and
+// writes envelopes onto its 16 sliders. Each slider corresponds to one
+// bone; HoloRoll names each envelope at generation time.
+//
+// You don't interact with this plugin directly. HoloRoll inserts it,
+// names it, and writes points onto its envelopes. Feel free to inspect or
+// edit the generated envelope curves like any other REAPER automation —
+// the plugin won't fight you.
+//
+// Why 16 sliders
+// --------------
+// Five for top-active world-motion bones, five for top-active local-motion
+// bones, six reserved for future manual-selection extensions. JSFX
+// supports up to 256 sliders so growing this is cheap if needed; we stay
+// at 16 to keep the FX UI uncluttered.
+//
+// All sliders are normalised [0..1]. HoloRoll rescales the raw motion
+// magnitudes (which are in scene units) into this range when writing
+// envelope points.
+//
+// Slider definitions: slider<N>:<default>,<min>,<max>,<step>=<label>
+// Range 0..1, step 0.001 — fine enough for smooth motion curves at
+// typical animation frame rates.
+
+slider1:0<0,1,0.001>Bone 1
+slider2:0<0,1,0.001>Bone 2
+slider3:0<0,1,0.001>Bone 3
+slider4:0<0,1,0.001>Bone 4
+slider5:0<0,1,0.001>Bone 5
+slider6:0<0,1,0.001>Bone 6
+slider7:0<0,1,0.001>Bone 7
+slider8:0<0,1,0.001>Bone 8
+slider9:0<0,1,0.001>Bone 9
+slider10:0<0,1,0.001>Bone 10
+slider11:0<0,1,0.001>Bone 11
+slider12:0<0,1,0.001>Bone 12
+slider13:0<0,1,0.001>Bone 13
+slider14:0<0,1,0.001>Bone 14
+slider15:0<0,1,0.001>Bone 15
+slider16:0<0,1,0.001>Bone 16
+
+in_pin:none
+out_pin:none
+
+@init
+// Nothing to initialise. Slider values come from REAPER's automation
+// engine (i.e. our envelopes) on every block.
+
+@slider
+// Sliders are read-only from this plugin's perspective — we do not
+// react to slider changes. The whole point is to expose them as
+// automation targets.
+
+@sample
+// Empty: no audio processing. With in_pin:none / out_pin:none REAPER
+// won't route audio through us anyway, but a JSFX must declare at
+// least one code section to be valid, hence this empty body.

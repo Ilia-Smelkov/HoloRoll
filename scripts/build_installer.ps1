@@ -94,6 +94,22 @@ try {
   Copy-Item -Path $dllPath -Destination (Join-Path $payloadDir "reaper_holoroll.dll") -Force
   Write-Host "Staged DLL -> installer\payload\reaper_holoroll.dll"
 
+  # v0.12.0-alpha.3: stage bundled JSFX assets. The installer copies
+  # these into REAPER's Effects/HoloRoll/ folder alongside the main DLL
+  # install. See holoroll.iss [Files] section and DefaultEffectsDir().
+  $jsfxSourceDir = Join-Path $repoRoot "assets\effects\HoloRoll"
+  if (Test-Path $jsfxSourceDir) {
+    $jsfxPayloadDir = Join-Path $payloadDir "effects\HoloRoll"
+    if (Test-Path $jsfxPayloadDir) {
+      Remove-Item $jsfxPayloadDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $jsfxPayloadDir -Force | Out-Null
+    Copy-Item -Path (Join-Path $jsfxSourceDir "*") -Destination $jsfxPayloadDir -Recurse -Force
+    Write-Host "Staged JSFX assets -> installer\payload\effects\HoloRoll\"
+  } else {
+    Write-Warning "JSFX assets directory not found at '$jsfxSourceDir' — installer won't bundle them."
+  }
+
   # ---- Locate ISCC ----------------------------------------------------------
   if (-not $IsccPath) {
     $candidates = @(

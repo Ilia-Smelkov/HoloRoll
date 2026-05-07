@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.3] — 2026-05-07
+
+Bundles a JSFX placeholder plugin (`holoroll_motion`) so the upcoming
+C++ side can host per-bone motion envelopes on it. No C++ changes yet —
+this release is purely about getting the JSFX file into the right place
+on disk.
+
+### Added
+- **`assets/effects/HoloRoll/holoroll_motion.jsfx`** — a 16-slider JSFX
+  plugin that does no audio processing (`in_pin:none` / `out_pin:none`).
+  Each slider is a `[0..1]` range parameter named "Bone 1" through
+  "Bone 16". HoloRoll's C++ side will rename them and write envelopes
+  onto them at motion-export time. Zero CPU cost during playback.
+  - Why JSFX, not a track Volume / Pan envelope hack: REAPER envelopes
+    must attach to a parameter; volume hijack would dirty audio routing
+    and limit us to one curve per track. JSFX sliders are the canonical
+    way to expose N independent envelope targets on a single track.
+  - Why 16 sliders: 5 for top-active world bones, 5 for top-active
+    local bones, 6 reserved for future manual-selection. Cheap to grow
+    (JSFX supports up to 256) but 16 keeps the FX UI uncluttered.
+- **Bootstrap deploys JSFX too** (`scripts/bootstrap.ps1`). Running
+  `bootstrap.ps1 -DeployToReaper` now also copies
+  `assets/effects/HoloRoll/*` into `%APPDATA%\REAPER\Effects\HoloRoll\`
+  alongside the DLL deployment. New optional parameter
+  `-ReaperEffectsDir` to override the destination.
+- **Installer bundles JSFX** (`installer/holoroll.iss`). New
+  `DefaultEffectsDir()` Pascal function resolves REAPER's Effects/
+  directory (portable-aware, mirrors `DefaultPluginsDir`). New `[Files]`
+  entry copies `payload\effects\HoloRoll\*` to that location.
+  `[UninstallDelete]` removes the HoloRoll subfolder on uninstall —
+  user-created JSFX in the main Effects/ folder are not touched.
+- **`build_installer.ps1`** stages JSFX assets into
+  `installer\payload\effects\HoloRoll\` before invoking ISCC.
+
+### Note for users
+- After installing this version, REAPER may need an FX rescan to see
+  `HoloRoll/holoroll_motion`. Either restart REAPER, or run
+  Options → Preferences → Plug-ins → Re-scan. We'll automate this from
+  C++ in alpha.4 when the extension actually starts inserting the JSFX.
+- Until alpha.4, this plugin sits idle on disk. Inserting it manually
+  on a track is harmless (it does nothing) but won't show motion data —
+  HoloRoll's C++ side has to write envelopes to populate the sliders.
+
+### Internal
+- New repo directory `assets/effects/HoloRoll/` (this is canonical —
+  the same layout will host other bundled REAPER assets if we add them
+  later).
+- `installer/payload/` (gitignored) now also receives an `effects/`
+  subdirectory at build time.
+
+
 ## [0.12.0-alpha.2] — 2026-05-07
 
 Adds local-motion computation alongside world motion. Both metrics are now
@@ -826,7 +877,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.2...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.3...HEAD
+[0.12.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.3
 [0.12.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.2
 [0.12.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.1
 [0.11.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.11.1
