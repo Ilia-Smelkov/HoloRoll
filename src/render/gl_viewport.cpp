@@ -930,6 +930,46 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     ImGui::SameLine();
     if (ImGui::Button("Place all")) pendingRequests_.placeRegions = true;
 
+    // v0.11.0: placement options. Inline so they're visible right next to
+    // the Place all button — the value is what "Place all" will use.
+    // The dirty flag fires once any of these fires; entry.cpp picks that
+    // up via ConsumePlacementDirty and writes to holoroll_config.ini.
+    ImGui::PushItemWidth(80.0f);
+    if (ImGui::InputInt("Variations", &placementVariations_)) {
+      placementVariations_ = std::max(1, std::min(20, placementVariations_));
+      placementDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("How many copies of each animation to place. >1 creates _2, _3 ... "
+                        "variation suffixes — same animation, separate items so you can\n"
+                        "layer different sounds.");
+    }
+    if (ImGui::InputFloat("Pre-roll (s)", &placementPreRollSec_, 0.0f, 0.0f, "%.2f")) {
+      placementPreRollSec_ = std::max(0.0f, std::min(10.0f, placementPreRollSec_));
+      placementDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Hold-frame buffer BEFORE the animation. Frame 0 is shown during\n"
+                        "this section so the user has space for anticipation sounds.");
+    }
+    if (ImGui::InputFloat("Post-roll (s)", &placementPostRollSec_, 0.0f, 0.0f, "%.2f")) {
+      placementPostRollSec_ = std::max(0.0f, std::min(10.0f, placementPostRollSec_));
+      placementDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Hold-frame buffer AFTER the animation. Last frame is shown during\n"
+                        "this section so reverbs/tails have room.");
+    }
+    if (ImGui::InputFloat("Region overhang (s)", &placementRegionOverhang_, 0.0f, 0.0f, "%.2f")) {
+      placementRegionOverhang_ = std::max(0.0f, std::min(10.0f, placementRegionOverhang_));
+      placementDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Region extends this many seconds past the end of the item.\n"
+                        "Visual handle for grouping; doesn't affect playback.");
+    }
+    ImGui::PopItemWidth();
+
     // "Reset to default folder" only shows when an override is active — it
     // would be a no-op confusion otherwise.
     if (status.folderIsOverride) {
@@ -1656,5 +1696,27 @@ void GlViewport::GetSceneSettings(bool* showGround, float* radius, float* gridSt
 bool GlViewport::ConsumeSceneDirty() {
   const bool was = sceneDirty_;
   sceneDirty_ = false;
+  return was;
+}
+
+// ---- v0.11.0 placement options API -----------------------------------------
+
+void GlViewport::SetPlacementOptions(int variations, float preRollSec, float postRollSec, float regionOverhangSec) {
+  placementVariations_ = std::max(1, std::min(20, variations));
+  placementPreRollSec_ = std::max(0.0f, std::min(10.0f, preRollSec));
+  placementPostRollSec_ = std::max(0.0f, std::min(10.0f, postRollSec));
+  placementRegionOverhang_ = std::max(0.0f, std::min(10.0f, regionOverhangSec));
+}
+
+void GlViewport::GetPlacementOptions(int* variations, float* preRollSec, float* postRollSec, float* regionOverhangSec) const {
+  if (variations) *variations = placementVariations_;
+  if (preRollSec) *preRollSec = placementPreRollSec_;
+  if (postRollSec) *postRollSec = placementPostRollSec_;
+  if (regionOverhangSec) *regionOverhangSec = placementRegionOverhang_;
+}
+
+bool GlViewport::ConsumePlacementDirty() {
+  const bool was = placementDirty_;
+  placementDirty_ = false;
   return was;
 }

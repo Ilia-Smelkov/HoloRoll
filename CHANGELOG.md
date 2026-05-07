@@ -7,6 +7,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-05-07
+
+Refines the v0.11.0 placement semantics after testing. Items now stay
+clean (length = animation duration only) and pre/post-roll act as global
+visual playback buffers, not as item-baked length extensions.
+
+### Changed
+- **Variation suffix is now zero-padded.** `_2`, `_3` -> `_02`, `_03`,
+  `_04`, ..., `_09`, `_10`, `_11`. Sort-friendly and visually consistent.
+  Variation matching is unaffected (the `_<digits>` strip already accepts
+  any digit count, including padded forms).
+- **Item length = animation duration only.** Previously items were
+  `preRoll + animation + postRoll` long, which baked the playback buffers
+  into the item geometry. Now items are clean: their start matches frame
+  0, their end matches the last frame.
+- **Region length = item length + region overhang.** Region no longer
+  includes pre/post-roll. The 0.5 s default overhang sits past the item
+  end as a visual handle.
+- **Pre/post-roll are now GLOBAL playback buffers.** They live in the
+  current placement settings (config-stored, edited in the inline
+  fields). At playback time, the resolver expands its match window by
+  these values: while the playhead sits in the buffer zone before an
+  item, frame 0 is shown (held); after an item, the last frame is shown
+  (held). Editing pre/post-roll updates all items immediately — no
+  re-place needed.
+- Per-item P_EXT keys for pre/post-roll (introduced in v0.11.0) are no
+  longer written. They're still read by older v0.11.0 timelines but
+  ignored — the global current settings always win.
+
+### Behaviour
+- Visually on the timeline:
+  ```
+            [pre-roll buffer]   [== item ==]   [region overhang]
+                                                   [post-roll buffer]
+            playhead shows      normal play        playhead shows last
+            frame 0 here                           frame here
+  ```
+  Pre-roll and post-roll buffers have no visible representation in the
+  timeline — they're just zones where the viewport keeps showing the
+  appropriate held frame.
+- Region overhang stays as a separate, visible handle past item end.
+
+### Internal
+- `MakeVariationName` uses `"_%02d"` for padding.
+- `CreateNamedItemWithRolls` no longer adds pre/post-roll to length.
+  Signature kept for source compatibility; the params are ignored.
+- `ResolvePlayheadFromItems` takes `globalPreRollSec` /
+  `globalPostRollSec` and expands the match window by these.
+- `EnumProjectItems` still populates `DiscoveredItem.preRollSec` and
+  `postRollSec` but always sets them to 0 (legacy P_EXT values are
+  ignored). Both fields will be removed in a later cleanup.
+
+## [0.11.0] — 2026-05-07
+
+Placement workflow gets four UX upgrades: variations, de-dup, hold-frame
+buffers, and region overhang. Each item now contains its own pre/post-roll
+so playback respects the held frames.
+
+### Added
+- **Variations count.** Inline field next to "Place all" (1–20). When > 1,
+  each animation produces N items with `_2`, `_3`, ... suffixes — same
+  geometry, separate items so the user can layer different sounds.
+  Variation suffix matching from v0.6.0 already handles resolution.
+- **De-dup on Place all.** Items with the same name are no longer
+  duplicated when "Place all" runs more than once. The new logic
+  snapshots existing HoloRoll item names before placement and skips any
+  that are already present. Skip count is logged to the console.
+- **Hold-frame buffers (pre-roll / post-roll).** Each placed item now
+  has configurable hold-frame regions:
+  ```
+  [pre-roll | animation | post-roll]
+  ```
+  - Pre-roll: frame 0 is held for N seconds before the animation begins.
+    Useful for anticipation sounds or visual breathing room.
+  - Post-roll: last frame is held for N seconds after the animation
+    completes. Useful for reverb tails, settling motion sound, etc.
+  - Defaults: 1.0 s each. Configurable per-placement via inline fields.
+- **Region overhang.** The region that accompanies each item now extends
+  past the item's end by a configurable amount (default 0.5 s). Just a
+  visual handle for grouping; doesn't affect playback.
+- All four options live in inline fields under the "Place all" button in
+  the Library section. Edits are auto-persisted to
+  `holoroll_config.ini` (debounced ~500 ms).
+- Per-item P_EXT keys: `P_EXT:holoroll_pre`, `P_EXT:holoroll_post`.
+  Stamped at placement time; read at playback time so the hold-frame
+  semantics survive project saves and reloads.
+
+### Changed
+- `ResolvePlayheadFromItems` now subtracts pre-roll from local time and
+  clamps to last frame on overrun. Items created in v0.10.x and earlier
+  have no P_EXT pre/post values, default to 0, and behave identically
+  to before.
+- New helper `CreateNamedItemWithRolls` returns the created MediaItem*
+  so callers can stamp regions/etc. directly. Old `CreateNamedItem`
+  signature kept as a thin wrapper for the v0.6.0 spike test.
+- `MakeVariationName(basename, n)` builds variation suffixes consistently
+  across all three placement paths.
+
+### Behaviour notes
+- A second "Place all" run with no library changes is now a no-op (skips
+  everything). Editing variations, then running again, will fill in only
+  the missing variations.
+- Items can be deleted manually in REAPER and re-placed with a fresh
+  "Place all" run; nothing prevents that.
+- The hot-reload modal ("new animations detected") also creates
+  variations — the modal asks you to place N animations, you confirm,
+  and each one fans out into the configured variation count.
+- The region overhang is purely visual. Playback still resolves entirely
+  off item bounds, not region bounds.
+
+### Internal
+- Four new persisted config keys: `placement.variations`,
+  `placement.pre_roll_seconds`, `placement.post_roll_seconds`,
+  `placement.region_overhang_seconds`.
+- Two new helper APIs on `GlViewport`: `SetPlacementOptions`,
+  `GetPlacementOptions`, plus `ConsumePlacementDirty` matching the
+  Scene-settings pattern.
+- `DiscoveredItem` carries `preRollSec` / `postRollSec`; `EnumProjectItems`
+  reads them from P_EXT during enumeration.
+
 ## [0.10.1] — 2026-05-07
 
 Fixes a real bug: when two REAPER projects sit in the same directory, they
@@ -605,7 +725,9 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.11.1
+[0.11.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.11.0
 [0.10.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.10.1
 [0.10.0]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.10.0
 [0.9.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.9.1

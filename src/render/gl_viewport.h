@@ -108,6 +108,12 @@ class GlViewport {
   // and by entry.cpp the first time an animation becomes active.
   void ResetCameraToDefault(const OverlayStatus& status);
 
+  // ---- v0.11.0 placement options (transient state owned by GlViewport,
+  //      persisted via Set/GetPlacementOptions — mirrors Scene settings) ---
+  void SetPlacementOptions(int variations, float preRollSec, float postRollSec, float regionOverhangSec);
+  void GetPlacementOptions(int* variations, float* preRollSec, float* postRollSec, float* regionOverhangSec) const;
+  bool ConsumePlacementDirty();
+
   // ---- Scene settings (persisted in holoroll_config.ini) -----------------
   void SetSceneSettings(bool showGround, float radius, float gridStep,
                         bool showBboxDims, bool showGridLabels, bool showRefHuman);
@@ -186,6 +192,19 @@ class GlViewport {
   bool showBboxDimensions_ = true;
   bool showGridLabels_ = true;
   bool showReferenceHuman_ = true;
+
+  // v0.11.0 placement options. Edited via the "Place all" overlay row;
+  // entry.cpp persists them to holoroll_config.ini and stamps the actual
+  // pre/post-roll values on each created item via P_EXT.
+  //   placementVariations_   - 1..N copies per animation (1 = no variations)
+  //   placementPreRollSec_   - hold-frame seconds before the animation
+  //   placementPostRollSec_  - hold-frame seconds after the animation
+  //   placementRegionOverhang_ - region extends this far past item end
+  int   placementVariations_ = 1;
+  float placementPreRollSec_ = 1.0f;
+  float placementPostRollSec_ = 1.0f;
+  float placementRegionOverhang_ = 0.5f;
+  bool  placementDirty_ = false;
 
   // -------- Input state --------
   POINT lastMousePos_{};
