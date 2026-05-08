@@ -73,6 +73,30 @@ using EnumProjectsFn = ReaProject* (*)(int idx, char* projfn, int projfn_sz);
 using SetProjExtStateFn = int (*)(ReaProject* proj, const char* extname, const char* key, const char* value);
 using GetProjExtStateFn = int (*)(ReaProject* proj, const char* extname, const char* key, char* valOutNeedBig, int valOutNeedBig_sz);
 
+// ---- v0.12.0-alpha.4 Track FX APIs (motion envelope hosting) -------------
+//
+// TrackFX_AddByName: add an FX to a track by display name. instantiate
+// flag controls behaviour:
+//    0  = query-only, returns existing FX index or -1 if not present
+//    1  = always add a new instance, returns its index
+//   <0  = add only if not already present, returns existing index if found
+//
+// Returns FX index (>=0) on success, -1 on failure. For JSFX, the name
+// uses the file path inside Effects/, e.g. "HoloRoll/holoroll_motion".
+using TrackFX_AddByNameFn = int (*)(MediaTrack* track, const char* fxname, bool recFX, int instantiate);
+
+// Number of FX on the track's regular FX chain (excludes record/input FX).
+using TrackFX_GetCountFn = int (*)(MediaTrack* track);
+
+// Get the display name of an FX. bufOut is filled with up to bufOut_sz bytes.
+// Returns true on success.
+using TrackFX_GetFXNameFn = bool (*)(MediaTrack* track, int fx, char* bufOut, int bufOut_sz);
+
+// Generic track property getter/setter. We use it for track names
+// (parmname="P_NAME"). REAPER docs say the parameter buffer must be writable
+// even when reading.
+using GetSetMediaTrackInfo_StringFn = bool (*)(MediaTrack* tr, const char* parmname, char* stringNeedBig, bool setNewValue);
+
 struct ReaperApi {
   GetPlayPositionFn getPlayPosition = nullptr;
   GetPlayStateFn getPlayState = nullptr;
@@ -115,6 +139,12 @@ struct ReaperApi {
   EnumProjectsFn enumProjects = nullptr;
   SetProjExtStateFn setProjExtState = nullptr;
   GetProjExtStateFn getProjExtState = nullptr;
+
+  // v0.12.0-alpha.4: track FX hosting for motion envelopes.
+  TrackFX_AddByNameFn trackFX_AddByName = nullptr;
+  TrackFX_GetCountFn trackFX_GetCount = nullptr;
+  TrackFX_GetFXNameFn trackFX_GetFXName = nullptr;
+  GetSetMediaTrackInfo_StringFn getSetMediaTrackInfo_String = nullptr;
 };
 
 bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api);

@@ -51,6 +51,12 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.setProjExtState = reinterpret_cast<SetProjExtStateFn>(rec->GetFunc("SetProjExtState"));
   api.getProjExtState = reinterpret_cast<GetProjExtStateFn>(rec->GetFunc("GetProjExtState"));
 
+  // v0.12.0-alpha.4: track FX APIs for motion envelope hosting.
+  api.trackFX_AddByName = reinterpret_cast<TrackFX_AddByNameFn>(rec->GetFunc("TrackFX_AddByName"));
+  api.trackFX_GetCount = reinterpret_cast<TrackFX_GetCountFn>(rec->GetFunc("TrackFX_GetCount"));
+  api.trackFX_GetFXName = reinterpret_cast<TrackFX_GetFXNameFn>(rec->GetFunc("TrackFX_GetFXName"));
+  api.getSetMediaTrackInfo_String = reinterpret_cast<GetSetMediaTrackInfo_StringFn>(rec->GetFunc("GetSetMediaTrackInfo_String"));
+
   return api.getPlayPosition && api.mainOnCommand;
 }
 

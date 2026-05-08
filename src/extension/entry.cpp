@@ -964,6 +964,162 @@ MediaTrack* EnsureTrackOnTop() {
   return api.getTrack(nullptr, 0);
 }
 
+// ---- v0.12.0-alpha.4 motion track + JSFX hosting --------------------------
+//
+// HoloRoll uses a dedicated track named "HoloRoll Motion" to host the
+// motion-analysis envelopes. The track itself only exists as a parameter
+// host; nothing routes audio through it. The actual envelope target is the
+// holoroll_motion JSFX (16 sliders, 0..1) inserted on the track's regular
+// FX chain.
+//
+// Both EnsureMotionTrack and EnsureMotionFx are idempotent — they only
+// create what's missing. Pressing "Setup motion track" multiple times is
+// safe and a no-op after the first successful call.
+constexpr char kMotionTrackName[] = "HoloRoll Motion";
+// Names by which TrackFX_AddByName might find our JSFX. We try them in
+// order; the first one that succeeds wins.
+//
+// IMPORTANT: order matters. We put the desc: line first because that's
+// the canonical "display name" REAPER uses, and that resolution path is
+// the one that actually loads the plugin file properly. The filename
+// forms below it sometimes succeed but resolve to a broken alias entry
+// in REAPER's FX index (observed empirically on REAPER 7+) — the JSFX
+// loads but is reported as "could not be loaded". Match desc: first to
+// avoid that path entirely.
+constexpr const char* kMotionFxNameCandidates[] = {
+    "HoloRoll Motion",              // desc: line bare — PREFERRED
+    "JS: HoloRoll Motion",          // desc: line with the JS prefix REAPER displays
+    "HoloRoll/holoroll_motion",     // relative path inside Effects/
+    "holoroll_motion.jsfx",         // filename with extension
+    "holoroll_motion",              // filename without extension — LAST RESORT
+};
+
+// Read a track's display name. Returns empty string on failure or if the
+// track has no name set.
+std::string ReadTrackName(MediaTrack* track) {
+  if (!track) return {};
+  const auto& api = g_bridge.Api();
+  if (!api.getSetMediaTrackInfo_String) return {};
+  // P_NAME buffer is read-back as a string; REAPER docs don't give a hard
+  // size limit but track names are conventionally short. 256 is generous.
+  char buf[256] = {};
+  if (!api.getSetMediaTrackInfo_String(track, "P_NAME", buf, false)) return {};
+  return std::string(buf);
+}
+
+// Walk all tracks in the active project, find the first one whose P_NAME
+// matches `name` exactly. Case-sensitive by design — a stray manual rename
+// (e.g. "HoloRoll motion" lowercase) shouldn't silently match and confuse
+// the user. Returns nullptr if no match.
+MediaTrack* FindTrackByName(const std::string& name) {
+  const auto& api = g_bridge.Api();
+  if (!api.countTracks || !api.getTrack) return nullptr;
+  const int trackCount = api.countTracks(nullptr);
+  for (int i = 0; i < trackCount; ++i) {
+    MediaTrack* track = api.getTrack(nullptr, i);
+    if (!track) continue;
+    if (ReadTrackName(track) == name) return track;
+  }
+  return nullptr;
+}
+
+// Find the existing "HoloRoll Motion" track, or create a new one at the
+// bottom of the track list and name it. Returns nullptr if the track
+// can't be created (API missing, etc.).
+//
+// Why bottom (not top): the top track is reserved for animation items via
+// EnsureTrackOnTop() — the user expects new animations to appear there.
+// Putting motion at the bottom keeps the two clearly separated and means
+// the motion track is out of the way visually until the user wants it.
+MediaTrack* EnsureMotionTrack() {
+  if (MediaTrack* existing = FindTrackByName(kMotionTrackName)) return existing;
+
+  const auto& api = g_bridge.Api();
+  if (!api.insertTrackAtIndex || !api.countTracks || !api.getTrack ||
+      !api.getSetMediaTrackInfo_String) {
+    return nullptr;
+  }
+
+  // Insert at the end. countTracks() returns the count BEFORE insertion;
+  // passing that as the index appends.
+  const int insertIdx = api.countTracks(nullptr);
+  api.insertTrackAtIndex(insertIdx, true);
+  MediaTrack* track = api.getTrack(nullptr, insertIdx);
+  if (!track) return nullptr;
+
+  // Set the name. P_NAME setter wants a writable buffer.
+  char buf[256];
+  std::snprintf(buf, sizeof(buf), "%s", kMotionTrackName);
+  api.getSetMediaTrackInfo_String(track, "P_NAME", buf, true);
+
+  return track;
+}
+
+// Insert the holoroll_motion JSFX on the motion track if it isn't already
+// there. Returns the FX index on success, or -1 on failure.
+//
+// We try multiple name forms (see kMotionFxNameCandidates) because
+// REAPER's JSFX name-resolution behaviour for TrackFX_AddByName varies
+// between versions and on whether the JSFX lives in a subfolder.
+//
+// instantiate=-1 means "add only if not already present, return existing
+// index if found." This is the right idempotent semantic for our use:
+// pressing the button multiple times shouldn't create stacked copies.
+int EnsureMotionFx(MediaTrack* track) {
+  if (!track) return -1;
+  const auto& api = g_bridge.Api();
+  if (!api.trackFX_AddByName) return -1;
+
+  // First pass: query-only (instantiate=0) for each candidate name. If
+  // any returns >=0, the FX is already on the track — we're done.
+  for (const char* name : kMotionFxNameCandidates) {
+    const int existing = api.trackFX_AddByName(track, name, false, 0);
+    if (existing >= 0) return existing;
+  }
+
+  // Second pass: actually add. instantiate=-1 = add-or-find. The first
+  // candidate that succeeds is our winner. We log which one worked at
+  // SetupMotionTrack level so the user (and we) can see it.
+  for (const char* name : kMotionFxNameCandidates) {
+    const int idx = api.trackFX_AddByName(track, name, false, -1);
+    if (idx >= 0) {
+      SpikeLog(std::string("[holoroll] inserted JSFX using name '") +
+               name + "' at FX index " + std::to_string(idx) + ".\n");
+      return idx;
+    }
+  }
+  return -1;
+}
+
+// User-facing entry point: ensure the motion track exists, ensure the JSFX
+// is on it, log status. If the JSFX is missing from REAPER (e.g. the user
+// hasn't restarted REAPER after install), TrackFX_AddByName returns -1 and
+// we tell the user explicitly so they know to rescan FX.
+void SetupMotionTrack() {
+  const auto& api = g_bridge.Api();
+
+  MediaTrack* track = EnsureMotionTrack();
+  if (!track) {
+    SpikeLog("[holoroll] FAIL: could not create or find HoloRoll Motion track. "
+             "REAPER API for tracks may be incomplete.\n");
+    return;
+  }
+
+  const int fxIdx = EnsureMotionFx(track);
+  if (fxIdx < 0) {
+    SpikeLog("[holoroll] FAIL: could not insert holoroll_motion JSFX. "
+             "REAPER may need to rescan FX (Options \u2192 Preferences \u2192 "
+             "Plug-ins \u2192 Re-scan), or restart REAPER. "
+             "Verify the JSFX is at %APPDATA%\\REAPER\\Effects\\HoloRoll\\holoroll_motion.jsfx.\n");
+    return;
+  }
+
+  SpikeLog("[holoroll] motion track ready: '" + std::string(kMotionTrackName) +
+           "' has the holoroll_motion JSFX at FX index " +
+           std::to_string(fxIdx) + ".\n");
+  if (api.updateArrange) api.updateArrange();
+}
+
 // v0.11.1: build a variation name with zero-padded 2-digit suffix.
 // Index 1 returns the bare basename (no suffix). Indices 2,3,...,9 produce
 // `_02`, `_03` ... `_09`. Index 10+ produces `_10`, `_11` ... naturally.
@@ -1756,6 +1912,13 @@ void OnTimer() {
   if (req.reloadConfig) ReloadConfigFromDisk();
   if (req.spikeTestCreateItem) SpikeTestCreateItem();
   if (req.resetFolderOverride) ResetFolderToProjectDefault();
+
+  // v0.12.0-alpha.4: motion track + JSFX hosting setup. The actual
+  // envelope writing for selected bones lands in alpha.5.
+  if (req.setupMotionTrack) {
+    SetupMotionTrack();
+    ForceShowReaperConsole();  // Show success/failure log to user.
+  }
 
   // Handle the new-animations modal response.
   if (req.newAnimationsChoice == 1) {

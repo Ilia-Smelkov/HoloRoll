@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.4] — 2026-05-08
+
+First C++ wiring for motion envelopes: HoloRoll can now create a dedicated
+"HoloRoll Motion" track and auto-insert the holoroll_motion JSFX on it.
+No envelope generation yet — alpha.5 will fill in motion data.
+
+### Added
+- **Track FX REAPER API bindings.** `TrackFX_AddByName`,
+  `TrackFX_GetCount`, `TrackFX_GetFXName`, `GetSetMediaTrackInfo_String`
+  (resolved in `reaper_bridge.cpp`, exposed via `ReaperApi` struct).
+- **Track helpers in `entry.cpp`.**
+  - `ReadTrackName(track)` — read P_NAME via GetSetMediaTrackInfo_String.
+  - `FindTrackByName(name)` — walk the project, find by exact-match name.
+  - `EnsureMotionTrack()` — find "HoloRoll Motion" or create at the
+    bottom of the track list. Idempotent.
+  - `EnsureMotionFx(track)` — insert holoroll_motion JSFX with
+    instantiate=-1 (add-or-find). Returns FX index, or -1 on failure.
+  - `SetupMotionTrack()` — user-facing entry point. Logs success or a
+    helpful failure message (e.g. "REAPER may need to rescan FX").
+- **"Setup motion track" button in overlay**, under a new
+  "v0.12.0-alpha.4: motion envelope groundwork" section. Hovering shows
+  a tooltip explaining what the button does. Console is force-shown on
+  click so the success/failure log is immediately visible.
+
+### Design notes
+- **Motion track at the bottom of the track list, not top.** The top
+  track is reserved for animation items (`EnsureTrackOnTop()`). Putting
+  motion at the bottom keeps the two visually separated and out of the
+  way until the user wants to look at it.
+- **Idempotent setup.** Pressing "Setup motion track" multiple times is
+  safe — if the track already exists, it's reused; if the JSFX is
+  already on it, the existing FX index is returned. No stacked copies.
+- **Case-sensitive track-name match.** A stray manual rename (e.g.
+  "HoloRoll motion" lowercase) won't silently match — the user gets a
+  fresh correctly-named track. Better than fighting over capitalisation.
+- **No envelope generation in this release.** Confirmed scope: alpha.4
+  is just the plumbing (track + JSFX). alpha.5 adds REAPER envelope API
+  bindings (`GetFXEnvelope`, `InsertEnvelopePoint`,
+  `Envelope_SortPoints`, `DeleteEnvelopePointRangeEx`) and the actual
+  motion-curve writing. Splitting the work this way means a failure in
+  alpha.4 ("button does nothing") is unambiguous — it's a track/FX
+  issue, not a math/envelope issue.
+
+### Note for users
+- If "Setup motion track" reports `could not insert holoroll_motion
+  JSFX`, REAPER hasn't picked up the JSFX yet. Either restart REAPER
+  or run `Options → Preferences → Plug-ins → Re-scan`. After that
+  the button works.
+
+
 ## [0.12.0-alpha.3] — 2026-05-07
 
 Bundles a JSFX placeholder plugin (`holoroll_motion`) so the upcoming
@@ -877,7 +927,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.3...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.4...HEAD
+[0.12.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.4
 [0.12.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.3
 [0.12.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.2
 [0.12.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.1
