@@ -36,29 +36,37 @@ struct LoadedAnimation {
   // Per-triangle face normals computed from the rest pose (frame 0).
   std::vector<float> restNormals;
 
-  // ---- v0.12.0 motion analysis ------------------------------------------
+  // ---- v0.12.0 motion analysis (alpha.8 semantics) ----------------------
   //
-  // Per-bone motion magnitude curves, computed at load time. Two metrics:
+  // Per-bone motion curves computed at load time. SIGNED projection of
+  // probe-tip position onto each joint's principal motion axis (max
+  // deviation from trajectory mean) — see glb_loader.cpp's
+  // projectSigned post-process. Two metrics:
   //
-  //   localMotion[j][f]  - magnitude of bone j's LOCAL transform change
-  //                        from frame f-1 to f. Captures "this bone
-  //                        actually started moving" semantics: a child
-  //                        of a rotating parent has localMotion = 0 even
-  //                        though its world position is changing. Use this
-  //                        to find first-mover bones (handle vs door body).
+  //   localMotion[j][f]  - signed projection of bone j's probe in
+  //                        PARENT space. Captures "this bone actually
+  //                        rotated/translated on its own": a child of
+  //                        a rotating parent has localMotion ≈ 0 even
+  //                        if its world position is changing. Use to
+  //                        find first-mover bones (handle vs body).
   //
-  //   worldMotion[j][f]  - magnitude of bone j's WORLD position change
-  //                        from frame f-1 to f. Captures "how much the
-  //                        bone moved in world" semantics: a foot bone
-  //                        with fixed local rotation but a swinging hip
-  //                        parent will have non-zero worldMotion. Use
-  //                        this to find biggest amplitude bones for sound
+  //   worldMotion[j][f]  - signed projection of bone j's probe in
+  //                        WORLD space. Captures "how far the bone
+  //                        actually moved in the scene": a foot with
+  //                        fixed local rotation but swinging hip
+  //                        parent has non-zero worldMotion. Use to
+  //                        find biggest-amplitude motion for sound
   //                        timing.
   //
-  // Frame 0 always has motion = 0 (no previous frame). Both curves are
-  // empty for MDD animations (no skeleton). Joint name comes from the
-  // skin.joints[j].name field in the glTF; falls back to "joint_<idx>"
-  // if unnamed.
+  // 0 ≈ rest pose (mean of trajectory); positive/negative = displacement
+  // along the principal axis in either direction. Pre-alpha.8 these
+  // were rectified |speed| (always >= 0), but that produced 2x-frequency
+  // envelopes for sinusoidal motion (two bumps per swing); the signed
+  // form matches the visual frequency of the underlying motion.
+  //
+  // Both curves are empty for MDD animations (no skeleton). Joint name
+  // comes from skin.joints[j].name in the glTF; falls back to
+  // "joint_<idx>" if unnamed.
   std::vector<std::string> jointNames;
   std::vector<std::vector<float>> localMotion;
   std::vector<std::vector<float>> worldMotion;

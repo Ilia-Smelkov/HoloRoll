@@ -57,6 +57,18 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.trackFX_GetFXName = reinterpret_cast<TrackFX_GetFXNameFn>(rec->GetFunc("TrackFX_GetFXName"));
   api.getSetMediaTrackInfo_String = reinterpret_cast<GetSetMediaTrackInfo_StringFn>(rec->GetFunc("GetSetMediaTrackInfo_String"));
 
+  // v0.12.0-alpha.5: envelope writing APIs.
+  api.getFXEnvelope = reinterpret_cast<GetFXEnvelopeFn>(rec->GetFunc("GetFXEnvelope"));
+  api.insertEnvelopePoint = reinterpret_cast<InsertEnvelopePointFn>(rec->GetFunc("InsertEnvelopePoint"));
+  api.envelope_SortPoints = reinterpret_cast<Envelope_SortPointsFn>(rec->GetFunc("Envelope_SortPoints"));
+  api.deleteEnvelopePointRange = reinterpret_cast<DeleteEnvelopePointRangeFn>(rec->GetFunc("DeleteEnvelopePointRange"));
+  api.trackFX_GetNumParams = reinterpret_cast<TrackFX_GetNumParamsFn>(rec->GetFunc("TrackFX_GetNumParams"));
+
+  // v0.12.0-alpha.7: envelope state-chunk APIs (used to flip VIS to 1
+  // so freshly written envelopes appear without manual FX-window open).
+  api.getEnvelopeStateChunk = reinterpret_cast<GetEnvelopeStateChunkFn>(rec->GetFunc("GetEnvelopeStateChunk"));
+  api.setEnvelopeStateChunk = reinterpret_cast<SetEnvelopeStateChunkFn>(rec->GetFunc("SetEnvelopeStateChunk"));
+
   return api.getPlayPosition && api.mainOnCommand;
 }
 

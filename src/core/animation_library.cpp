@@ -131,6 +131,10 @@ void CopyMotionDataFromGlb(LoadedAnimation& anim) {
 // Returns something like:
 //   "Bip01 R Hand=12.345, Bip01 L Hand=11.812, Bip01 Head=4.231"
 // or an empty string if there's no skeleton or all joints are static.
+//
+// alpha.8: rank by sum of |motion[f]|, not raw sum. The new signed-
+// projection metric can sum to ~0 for symmetric oscillation (positive
+// frames cancel negatives) which would mask active bones as static.
 std::string SummarizeTopActiveBones(const LoadedAnimation& anim,
                                     const std::vector<std::vector<float>>& motion,
                                     std::size_t topN = 3) {
@@ -141,7 +145,7 @@ std::string SummarizeTopActiveBones(const LoadedAnimation& anim,
   rank.reserve(anim.jointNames.size());
   for (std::size_t j = 0; j < anim.jointNames.size() && j < motion.size(); ++j) {
     float sum = 0.0f;
-    for (float v : motion[j]) sum += v;
+    for (float v : motion[j]) sum += std::fabs(v);
     rank.push_back({j, sum});
   }
   std::partial_sort(rank.begin(),

@@ -981,20 +981,6 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     ImGui::Separator();
     ImGui::TextDisabled("DEV: items API spike");
     if (ImGui::Button("Test create item")) pendingRequests_.spikeTestCreateItem = true;
-
-    // v0.12.0-alpha.4: motion track setup. Creates (or finds) a dedicated
-    // "HoloRoll Motion" track and inserts the holoroll_motion JSFX on it.
-    // Envelope generation comes in alpha.5; this button just lays the
-    // groundwork.
-    ImGui::Separator();
-    ImGui::TextDisabled("v0.12.0-alpha.4: motion envelope groundwork");
-    if (ImGui::Button("Setup motion track")) pendingRequests_.setupMotionTrack = true;
-    if (ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("Creates a dedicated 'HoloRoll Motion' track at the bottom of the\n"
-                        "track list and inserts the holoroll_motion JSFX placeholder on it.\n"
-                        "Idempotent \u2014 safe to press multiple times.\n"
-                        "Envelope writing for selected bones lands in v0.12.0-alpha.5.");
-    }
   }
 
   if (ImGui::CollapsingHeader("Config", ImGuiTreeNodeFlags_DefaultOpen)) {

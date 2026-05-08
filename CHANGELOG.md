@@ -7,6 +7,250 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.8] — 2026-05-08
+
+Fundamental change to what motion analysis actually MEASURES.
+
+### Changed
+- **Motion metric: |speed| → signed principal-axis projection.**
+  Through alpha.7 we computed the Euclidean magnitude of the per-frame
+  probe-tip displacement — i.e. instantaneous |speed|. For sinusoidal
+  bone oscillation (rotate to angle, rotate back), |speed| is a
+  rectified `|cos(ωt)|`: TWO bumps per actual oscillation, with sharp
+  zeros at the turnaround points. Visually it looked like "two
+  semicircles per swing" instead of the single sine wave the user
+  expected.
+
+  alpha.8 stores per-joint probe trajectories during the bake loop,
+  then post-processes each joint:
+  1. Compute the mean probe position across all frames.
+  2. Find the frame whose deviation from mean has the largest
+     magnitude — its direction becomes the principal motion axis (a
+     cheap stand-in for the dominant eigenvector of the covariance
+     matrix; full PCA would be overkill for the typical 1D-ish
+     joint motions we see).
+  3. For each frame, the SIGNED projection of (position − mean) onto
+     that axis becomes the new `worldMotion[j][f]` /
+     `localMotion[j][f]` value.
+
+  The signal preserves the underlying motion's frequency: one
+  sinusoidal swing produces one sine wave on the envelope. Rest pose
+  ≈ 0 (or close to it; offset by however asymmetric the motion is
+  around its mean).
+
+### Fixed (knock-on)
+- **Frame 0 is now valid data.** Through alpha.7 the bake loop wrote
+  0 at frame 0 because there was no "previous" frame to diff against;
+  alpha.6/.7 papered over this with a forward-fill workaround that
+  often fell back to motion[1]=0 anyway. With the alpha.8 metric
+  there is no diff — frame 0's projection is just as valid as any
+  other frame, so the workaround is gone.
+
+### Affected APIs
+- `worldMotion_` / `localMotion_` semantics (signed instead of
+  non-negative). Direct readers should expect negative values.
+- `TopNActiveBones`: now ranks by sum-of-absolutes instead of raw
+  sum, since signed values cancel for symmetric oscillation.
+
+### Known follow-ups (not in this release)
+- "0 = rest pose" semantic is approximate when motion is asymmetric
+  around its mean. If a bone holds at one extreme for a long time,
+  its mean shifts toward that extreme and rest position projects to
+  a non-zero value. Acceptable for now; revisit if it bites on
+  complex animations.
+- Forward fall-back when the trajectory is essentially planar with
+  two equally significant axes (e.g. an XY circular motion). The
+  max-deviation reference picks one axis and projects the other to
+  zero. A full 2D PCA + magnitude metric would handle that, if/when
+  it becomes a real-world need.
+
+
+## [0.12.0-alpha.7] — 2026-05-08
+
+Polish-the-polish on motion envelopes after the alpha.6 build. Two
+fixes from the first hands-on test:
+
+### Fixed
+- **Envelopes now appear on the track immediately.** alpha.6 wrote the
+  envelope data correctly but its `VIS` flag stayed at 0, so the lane
+  didn't render until the user manually opened the FX window (which
+  triggered REAPER's auto-show). alpha.7 reads the envelope's state
+  chunk after writing points, replaces the `VIS X Y Z` line with
+  `VIS 1 1 1.0`, and writes it back. The motion lane is visible the
+  moment items get placed.
+- **Envelope values now span the full slider range.** alpha.6's
+  shared-peak normalisation (motion / sharedMax) clustered values
+  near 1.0 when motion was relatively uniform across the animation —
+  the curve looked flat and the slider's lower half was wasted. alpha.7
+  switches to min-max stretching: `(motion - sharedMin) / (sharedMax -
+  sharedMin)`. Slider 1 (most-active bone) hits both 0 and 1 at the
+  bone's actual valleys and peaks; sliders 2 and 3 stay proportional
+  using the same scale. Frame 0 is excluded from min/max computation
+  (it's a 0 from the bake loop, not a real motion sample) and is
+  forward-filled at write time.
+
+### Added
+- **Two new REAPER API bindings** (`reaper_api.h` /
+  `reaper_bridge.cpp`): `GetEnvelopeStateChunk` and
+  `SetEnvelopeStateChunk`, used by the new `EnsureEnvelopeVisible`
+  helper to flip the visibility flag. Buffer sized at 64 KB which is
+  comfortably above what our envelopes need.
+
+### Changed (signature)
+- `WriteMotionEnvelopeForBone(...)`: replaced the single
+  `peakNormalizer` parameter with `sharedMin, sharedMax` for min-max
+  stretching. Caller now computes both bounds in
+  `WriteMotionEnvelopesForItem`.
+
+### Known limitations
+- "0 = no motion" semantic is gone: a slider value of 0 now means
+  "minimum motion among the selected bones for this item", not "this
+  bone is stationary". On simple rigs (RiggedSimple) this is fine; on
+  complex rigs where the least-active selected bone never fully
+  stops, slider lanes never reach the bottom. Trade we explicitly
+  picked for visualisation clarity — re-evaluate if it bites.
+
+
+## [0.12.0-alpha.6] — 2026-05-08
+
+Polish pass on the alpha.5 motion-envelope plumbing. Three fixes after
+first hands-on testing:
+
+### Changed
+- **Single track for items + JSFX + envelopes.** alpha.5 created two
+  tracks per placement: a fresh top track for items and a separate
+  "HoloRoll Motion" track at the bottom for the JSFX and envelopes.
+  alpha.6 collapses both into a single persistent track named
+  "HoloRoll" — items, JSFX and motion envelopes all live on the same
+  row. Subsequent placements (Place all / hot-reload / +Place) find
+  the existing track by name and append, instead of stacking new
+  tracks.
+- **Shared-peak normalisation across the three sliders.** alpha.5
+  normalised each bone to its own peak, which made every slider stretch
+  to ~1.0 regardless of how active the bone was — visually identical
+  curves, no information conveyed about relative magnitude. alpha.6
+  computes one shared peak across all three selected bones for the
+  item: slider 1 (most-active bone) hits 1.0 at its peak; sliders 2
+  and 3 are visibly smaller in proportion to their own activity.
+- **Frame 0 is now forward-filled with frame 1's value.** The bake
+  loop legitimately writes 0 at frame 0 (no previous frame to diff
+  against), but the alpha.5 envelope rendered that as a fake drop at
+  the left edge of every item. alpha.6 substitutes motion[1] for the
+  first sample so the curve starts smoothly.
+
+### Removed
+- `EnsureMotionTrack`, `SetupMotionTrack`, `kMotionTrackName`,
+  `ClearAllMotionEnvelopes` — the bottom "HoloRoll Motion" track is
+  gone, so all the helpers that managed it are gone too.
+- `setupMotionTrack` field on `OverlayRequests` and the corresponding
+  dead dispatch block in `OnTimer` — there is no longer a manual
+  "Setup motion track" button (motion track creation is automatic and
+  collapsed into items track).
+- Console debug noise: `SpikeLog` for "inserted JSFX using name" and
+  "motion track ready" — both fired on success during placement and
+  cluttered the REAPER console. Errors and the final "placed N items"
+  summary remain.
+- `ForceShowReaperConsole()` after the library scan log: it popped
+  the console open on every project load / hot-reload, which was
+  intrusive. The log itself still appears if the user has the console
+  open.
+
+### Renamed
+- `EnsureMotionTrackAndFx` → `EnsureItemsTrackAndFx`.
+
+### Removed (signature change)
+- `WriteMotionEnvelopeForBone`'s `clearStart`, `clearEnd` parameters
+  collapsed into surgical [item.start, item.end] internally; gained
+  `peakNormalizer` (shared across the item's bones).
+- `WriteMotionEnvelopesForItem`'s `clearFullEnvelope` parameter
+  removed entirely (always surgical now).
+
+### Note for users
+- If you have an old "HoloRoll Motion" track at the bottom of your
+  project from alpha.5 testing, alpha.6 will not touch it — you can
+  delete it manually. New placements will create/reuse the single
+  "HoloRoll" track at the top.
+
+
+## [0.12.0-alpha.5] — 2026-05-08
+
+Motion data finally lands on the timeline as REAPER native envelopes!
+Auto-create on every placement path: "Place all", hot-reload modal, and
+"+ Place" now all materialise envelopes for the placed items, top-3
+world-motion bones each, on sliders 1..3 of the holoroll_motion JSFX.
+
+No "Setup motion track" button anymore — motion track + JSFX appear
+automatically when items appear. Cleaner UX, fewer steps.
+
+### Added
+- **Envelope-writing REAPER API bindings** (`reaper_api.h` /
+  `reaper_bridge.cpp`):
+  - `GetFXEnvelope(track, fxIdx, paramIdx, create)` — get-or-create the
+    envelope for an FX parameter.
+  - `InsertEnvelopePoint(env, time, value, shape, tension, selected,
+    noSortInOptional)` — single-point write. We pass `noSortIn=&true`
+    during batch writes for O(N) speed.
+  - `Envelope_SortPoints(env)` — final sort after batch.
+  - `DeleteEnvelopePointRange(env, t0, t1)` — wipe a time range before
+    re-writing.
+  - `TrackFX_GetNumParams(track, fx)` — paramIdx validation.
+- **Motion envelope helpers in `entry.cpp`**:
+  - `EnsureMotionTrackAndFx()` — wraps EnsureMotionTrack +
+    EnsureMotionFx, returns `{track, fxIdx}` or failure.
+  - `TopNActiveBones(motion, N)` — partial-sort top-N most-active bone
+    indices, filters out zero-motion bones.
+  - `WriteMotionEnvelopeForBone(track, fxIdx, paramIdx, motion,
+    itemStart, fps, clearStart, clearEnd)` — normalises against this
+    bone's peak, writes one envelope point per frame, sorts at end.
+  - `WriteMotionEnvelopesForItem(...)` — top-3 dispatch for one item.
+  - `ClearAllMotionEnvelopes(track, fxIdx)` — full wipe of sliders 1..N
+    before "Place all" (which re-creates every item).
+- **Auto-integration into all three placement paths**:
+  - `PlaceOurItemsAndRegions` ("Place all"): full clear, then write
+    envelopes for every placed item.
+  - `PlacePendingAtCursor` (hot-reload modal): surgical clear, write
+    envelopes only for new items — existing envelopes untouched.
+  - `PlaceSingleAtCursor` ("+ Place" button): surgical clear for the
+    one item, append to existing envelopes.
+
+### Changed
+- **"Setup motion track" button removed** from the overlay. Motion track
+  + JSFX are now created automatically on first placement; no separate
+  user action required. `setupMotionTrack` field on `OverlayRequests`
+  and `SetupMotionTrack()` helper kept for now in case we want a manual
+  re-trigger later, but they're no longer wired to any UI.
+
+### Slider semantics
+- **slider 1 = top-1 most-active world-motion bone of THIS item**.
+- **slider 2 = top-2** of THIS item.
+- **slider 3 = top-3** of THIS item.
+- Different items map different bones onto the same slider; that's by
+  design — "slider 1" always means "the most-active bone in whatever's
+  playing right now".
+- Sliders 4..16 reserved for future uses (local motion in alpha.6,
+  manual selection in v0.13+).
+- Each bone is normalised to [0,1] independently against its own peak,
+  so every envelope spans the full slider range — visually comparable
+  across items even when raw motion magnitudes differ.
+
+### Cleanup strategy
+- **"Place all"** = full clear (`DeleteEnvelopePointRange(env, -1e9, 1e9)`)
+  before placement. Items are recreated wholesale, so stale envelopes
+  from a previous Place all would otherwise pile up.
+- **Hot-reload / +Place** = surgical clear (`[itemStart, itemEnd]`).
+  Existing items keep their envelopes; only the new item's range gets
+  wiped + re-written.
+
+### Note for users
+- Motion envelopes appear on the "HoloRoll Motion" track at the bottom
+  of the track list. Click the track header to expand the FX chain;
+  there you'll see `JS: HoloRoll Motion` with sliders Bone 1..16.
+- Right-click any slider → Show track envelope to bring its envelope
+  lane into view in the main timeline.
+- Edit envelope curves freely — HoloRoll only re-writes when you
+  re-place items via Place all / hot-reload modal / + Place.
+
+
 ## [0.12.0-alpha.4] — 2026-05-08
 
 First C++ wiring for motion envelopes: HoloRoll can now create a dedicated
@@ -927,7 +1171,11 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.4...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.8...HEAD
+[0.12.0-alpha.8]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.8
+[0.12.0-alpha.7]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.7
+[0.12.0-alpha.6]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.6
+[0.12.0-alpha.5]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.5
 [0.12.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.4
 [0.12.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.3
 [0.12.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.2

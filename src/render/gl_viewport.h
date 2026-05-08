@@ -82,12 +82,6 @@ class GlViewport {
     // Non-empty if the user pressed "+ Place" next to a library entry.
     // entry.cpp uses this to call PlaceSingleAtCursor(name).
     std::string placeSingleAtCursor;
-
-    // v0.12.0-alpha.4: user pressed "Setup motion track". entry.cpp
-    // creates (or finds) the dedicated "HoloRoll Motion" track and
-    // inserts the holoroll_motion JSFX placeholder on it. No envelope
-    // generation yet — alpha.5 will fill in motion data.
-    bool setupMotionTrack = false;
   };
 
   bool Open();

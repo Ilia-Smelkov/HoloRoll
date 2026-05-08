@@ -741,13 +741,14 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
 
   // ---- v0.12.0 motion analysis: allocate per-joint curves -----------------
   //
-  // worldMotion_[j][f] = Euclidean distance moved by joint j between frames
-  // f-1 and f (in pre-recenter world space; the recenter pass below is a
-  // global constant offset, so it doesn't affect frame-to-frame deltas).
+  // worldMotion_[j][f] = SIGNED scalar of joint j's probe-tip position at
+  // frame f, projected onto the joint's principal motion axis (the
+  // direction of the largest deviation from the trajectory's mean).
   //
-  // Frame 0 is always 0 (no previous). We track previous-frame world
-  // positions in `prevJointWorldPos` to avoid storing all per-frame world
-  // matrices.
+  // alpha.8 changed this from |speed| (Euclidean delta between frames) to
+  // signed projection: a sinusoidal bone oscillation now produces ONE
+  // sine wave on the envelope rather than a rectified 2x-frequency one.
+  // 0 ≈ rest position; +/- = displacement along the principal axis.
   jointNames_.clear();
   jointNames_.reserve(jointCount);
   for (std::size_t j = 0; j < jointCount; ++j) {
@@ -762,11 +763,18 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
   // See the bake loop below for the per-frame computation.
   localMotion_.assign(jointCount, std::vector<float>(totalFrames_, 0.0f));
 
-  std::vector<Vec3> prevJointWorldPos(jointCount, Vec3{0, 0, 0});
-  // Same idea but in parent-local space — captures "this bone moved
-  // relative to its parent", which is what we want for first-mover
-  // detection (handle rotates while door body is still).
-  std::vector<Vec3> prevJointLocalProbe(jointCount, Vec3{0, 0, 0});
+  // v0.12.0-alpha.8: instead of tracking only the previous frame, we
+  // now store the full per-frame probe trajectory per joint. After the
+  // bake loop runs, a post-process pass projects each joint's
+  // trajectory onto its principal motion axis, producing a SIGNED
+  // scalar per frame (worldMotion_ / localMotion_). The signed signal
+  // matches the visual frequency of the underlying motion (one sine
+  // wave per oscillation), unlike the |speed| metric used through
+  // alpha.7 which had 2x frequency due to rectification.
+  std::vector<std::vector<Vec3>> probeWorldPositions(
+      jointCount, std::vector<Vec3>(totalFrames_, Vec3{0, 0, 0}));
+  std::vector<std::vector<Vec3>> probeLocalPositions(
+      jointCount, std::vector<Vec3>(totalFrames_, Vec3{0, 0, 0}));
 
   // ---- Per-frame baking loop ------------------------------------------------
   // Reusable scratch buffers (avoid allocating per frame).
@@ -857,60 +865,39 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
       jointSkin[j] = MulM(nodeWorld[n], ibms[j]);
     }
 
-    // ---- v0.12.0: per-joint motion magnitude --------------------------
+    // ---- v0.12.0-alpha.8: capture per-joint probe trajectories ----------
     //
-    // Two metrics, both using the same probe-point trick:
+    // Two trajectories per joint, both using the same probe-point trick:
     //
-    //   World motion: probe (0,1,0) transformed through nodeWorld[j].
-    //     Captures absolute motion of the bone tip in world space —
-    //     including motion inherited from parent rotations. A foot bone
-    //     with fixed local rotation but a swinging hip parent shows
-    //     non-zero world motion.
+    //   World probe: probe (0,1,0) transformed through nodeWorld[j].
+    //     Captures the bone tip in world space — including motion
+    //     inherited from parent rotations. A foot bone with fixed local
+    //     rotation but a swinging hip parent moves in world space.
     //
-    //   Local motion: probe (0,1,0) transformed through ONLY the joint's
-    //     own local TRS (no parent chain). Captures motion relative to
-    //     the parent — i.e. "this joint actually started moving on its
-    //     own." A child whose parent rotates but whose own local TRS is
-    //     fixed shows zero local motion (correct: it's not moving by its
-    //     own action, it's being carried by the parent).
+    //   Local probe: probe (0,1,0) transformed through ONLY the joint's
+    //     own local TRS (no parent chain). The result lives in parent
+    //     space — captures motion of the joint relative to its parent.
+    //     A child whose parent rotates but whose own local TRS is fixed
+    //     stays put in this metric (correct: it's not acting on its
+    //     own, only being carried).
     //
-    // Why the local probe lives in parent space (not joint-local):
-    //   The joint's local TRS maps from joint-local to parent-local. So
-    //   transforming probe(0,1,0) by the local TRS gives a point in the
-    //   parent's coordinate frame. Diffing across frames in that frame
-    //   isolates the joint's own contribution to motion.
-    //
-    // Frame 0 stays at 0 (no previous data); we still capture both
-    // probe positions so frame 1's deltas are correct.
+    // We store the full trajectory because the principal-axis projection
+    // (computed after the bake loop completes, see projectSigned below)
+    // needs all frames at once.
     constexpr Vec4 kProbePoint = {0.0f, 1.0f, 0.0f, 1.0f};
     for (std::size_t j = 0; j < jointCount; ++j) {
       const int n = skin.joints[j];
 
       // World probe: full hierarchy applied.
       const Vec4 probeWorld = MulMV(nodeWorld[n], kProbePoint);
-      const Vec3 curWorld = {probeWorld[0], probeWorld[1], probeWorld[2]};
+      probeWorldPositions[j][f] = {probeWorld[0], probeWorld[1], probeWorld[2]};
 
       // Local probe: only this joint's own TRS applied. The result lives
-      // in parent space — we never need to convert it anywhere; we just
-      // diff parent-space-to-parent-space across frames.
+      // in parent space — we never need to convert it anywhere.
       const auto& trs = currentTRS[n];
       const Mat4 localOnly = ComposeTRS(trs.translation, trs.rotation, trs.scale);
       const Vec4 probeLocal = MulMV(localOnly, kProbePoint);
-      const Vec3 curLocal = {probeLocal[0], probeLocal[1], probeLocal[2]};
-
-      if (f > 0) {
-        const float dwx = curWorld[0] - prevJointWorldPos[j][0];
-        const float dwy = curWorld[1] - prevJointWorldPos[j][1];
-        const float dwz = curWorld[2] - prevJointWorldPos[j][2];
-        worldMotion_[j][f] = std::sqrt(dwx * dwx + dwy * dwy + dwz * dwz);
-
-        const float dlx = curLocal[0] - prevJointLocalProbe[j][0];
-        const float dly = curLocal[1] - prevJointLocalProbe[j][1];
-        const float dlz = curLocal[2] - prevJointLocalProbe[j][2];
-        localMotion_[j][f] = std::sqrt(dlx * dlx + dly * dly + dlz * dlz);
-      }
-      prevJointWorldPos[j] = curWorld;
-      prevJointLocalProbe[j] = curLocal;
+      probeLocalPositions[j][f] = {probeLocal[0], probeLocal[1], probeLocal[2]};
     }
 
     // Skin every vertex.
@@ -943,6 +930,68 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
       frameBuf[v * 3 + 2] = acc[2];
     }
   }
+
+  // ---- v0.12.0-alpha.8: per-joint signed motion projection -----------------
+  //
+  // For each joint, take the per-frame probe trajectory (collected in the
+  // bake loop above), find the principal motion axis as the direction of
+  // the largest deviation from the trajectory's mean, and project every
+  // frame's deviation onto that axis. The result is a SIGNED scalar per
+  // frame stored in worldMotion_/localMotion_.
+  //
+  // Why signed instead of |speed|: sinusoidal bone motion (rotate to
+  // angle, rotate back) has |speed| with 2x frequency (rectified) — two
+  // bumps per oscillation. Projecting position deviations onto a fixed
+  // axis preserves the sign, so the envelope shape matches the visual
+  // frequency of the underlying motion.
+  //
+  // Why max-deviation reference (not full PCA): for the typical joint
+  // animations we care about, the motion is essentially 1D — a hinge
+  // rotation, a pendulum swing, a translation along one axis. The
+  // direction of the frame with maximum displacement from mean coincides
+  // with the principal direction in those cases, and is much cheaper
+  // than a full eigen-decomposition. We can revisit if multi-axis
+  // motion becomes important.
+  //
+  // Static joints (no displacement) leave their motion arrays at zero.
+  auto projectSigned = [&](const std::vector<std::vector<Vec3>>& positions,
+                           std::vector<std::vector<float>>& motionOut) {
+    for (std::size_t j = 0; j < jointCount; ++j) {
+      const auto& posJ = positions[j];
+      if (posJ.empty()) continue;
+      // Mean position across all frames.
+      Vec3 mean = {0.0f, 0.0f, 0.0f};
+      for (const Vec3& p : posJ) {
+        mean[0] += p[0]; mean[1] += p[1]; mean[2] += p[2];
+      }
+      const float invN = 1.0f / static_cast<float>(posJ.size());
+      mean[0] *= invN; mean[1] *= invN; mean[2] *= invN;
+      // Max-deviation direction.
+      Vec3 maxDev = {0.0f, 0.0f, 0.0f};
+      float maxLen2 = 0.0f;
+      for (const Vec3& p : posJ) {
+        const float dx = p[0] - mean[0];
+        const float dy = p[1] - mean[1];
+        const float dz = p[2] - mean[2];
+        const float l2 = dx * dx + dy * dy + dz * dz;
+        if (l2 > maxLen2) { maxLen2 = l2; maxDev = {dx, dy, dz}; }
+      }
+      if (maxLen2 < 1e-12f) continue;  // Static — leave zeros.
+      const float invLen = 1.0f / std::sqrt(maxLen2);
+      const Vec3 axis = {maxDev[0] * invLen, maxDev[1] * invLen, maxDev[2] * invLen};
+      // Signed projection per frame.
+      auto& mj = motionOut[j];
+      for (std::size_t f = 0; f < posJ.size(); ++f) {
+        const Vec3& p = posJ[f];
+        const float dx = p[0] - mean[0];
+        const float dy = p[1] - mean[1];
+        const float dz = p[2] - mean[2];
+        mj[f] = dx * axis[0] + dy * axis[1] + dz * axis[2];
+      }
+    }
+  };
+  projectSigned(probeWorldPositions, worldMotion_);
+  projectSigned(probeLocalPositions, localMotion_);
 
   // ---- v0.10.0: recenter to origin (XZ only, keep Y on the ground) ---------
   //

@@ -97,6 +97,50 @@ using TrackFX_GetFXNameFn = bool (*)(MediaTrack* track, int fx, char* bufOut, in
 // even when reading.
 using GetSetMediaTrackInfo_StringFn = bool (*)(MediaTrack* tr, const char* parmname, char* stringNeedBig, bool setNewValue);
 
+// ---- v0.12.0-alpha.5 envelope APIs (motion-curve writing) ----------------
+//
+// GetFXEnvelope: get-or-create the envelope for a specific FX parameter.
+// `create=true` materialises the envelope on the track if it doesn't
+// already exist. Returns nullptr if the (track, fx, param) tuple is
+// invalid or REAPER refuses for any reason.
+class TrackEnvelope;
+using GetFXEnvelopeFn = TrackEnvelope* (*)(MediaTrack* track, int fxindex, int parameterindex, bool create);
+
+// Insert one envelope point at `time` with `value`. shape: 0=linear,
+// 1=square, 2=slow start/end, 3=fast start, 4=fast end, 5=bezier.
+// noSortInOptional: pass a pointer to bool=true while batch-inserting,
+// then call Envelope_SortPoints once at the end. Pass nullptr for
+// per-point sorting (slow on bulk insert).
+using InsertEnvelopePointFn = bool (*)(TrackEnvelope* envelope, double time, double value,
+                                       int shape, double tension, bool selected,
+                                       bool* noSortInOptional);
+
+// Sort envelope points by time. Required after a batch insert that used
+// noSortIn=true. Returns false if the envelope pointer is invalid.
+using Envelope_SortPointsFn = bool (*)(TrackEnvelope* envelope);
+
+// Delete all envelope points within [time_start, time_end]. Used to
+// clean a stale section before re-writing motion data. Endpoints are
+// inclusive. Returns false if the envelope pointer is invalid.
+using DeleteEnvelopePointRangeFn = bool (*)(TrackEnvelope* envelope, double time_start, double time_end);
+
+// Number of FX parameters on a given FX. Used to validate paramIdx is in
+// range before calling GetFXEnvelope.
+using TrackFX_GetNumParamsFn = int (*)(MediaTrack* track, int fx);
+
+// ---- v0.12.0-alpha.7 envelope state-chunk APIs (visibility flag) -------
+//
+// GetFXEnvelope creates the envelope but leaves its VIS flag at 0 by
+// default — the envelope holds data but doesn't render in the track
+// view until the user manually opens the FX window. To make placed
+// motion envelopes appear immediately we read the envelope's state
+// chunk, flip its VIS line to "1 1 1.0" (visible / lane visible /
+// height factor 1.0), and write it back.
+using GetEnvelopeStateChunkFn = bool (*)(TrackEnvelope* env, char* strNeedBig,
+                                         int strNeedBig_sz, bool isundoOptional);
+using SetEnvelopeStateChunkFn = bool (*)(TrackEnvelope* env, const char* str,
+                                         bool isundoOptional);
+
 struct ReaperApi {
   GetPlayPositionFn getPlayPosition = nullptr;
   GetPlayStateFn getPlayState = nullptr;
@@ -145,6 +189,17 @@ struct ReaperApi {
   TrackFX_GetCountFn trackFX_GetCount = nullptr;
   TrackFX_GetFXNameFn trackFX_GetFXName = nullptr;
   GetSetMediaTrackInfo_StringFn getSetMediaTrackInfo_String = nullptr;
+
+  // v0.12.0-alpha.5: envelope writing.
+  GetFXEnvelopeFn getFXEnvelope = nullptr;
+  InsertEnvelopePointFn insertEnvelopePoint = nullptr;
+  Envelope_SortPointsFn envelope_SortPoints = nullptr;
+  DeleteEnvelopePointRangeFn deleteEnvelopePointRange = nullptr;
+  TrackFX_GetNumParamsFn trackFX_GetNumParams = nullptr;
+
+  // v0.12.0-alpha.7: envelope visibility flag via state chunk.
+  GetEnvelopeStateChunkFn getEnvelopeStateChunk = nullptr;
+  SetEnvelopeStateChunkFn setEnvelopeStateChunk = nullptr;
 };
 
 bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api);

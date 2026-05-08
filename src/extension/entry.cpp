@@ -3,6 +3,8 @@
 #include <shellapi.h>
 
 #include <cstdio>
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <string>
 #include <vector>
@@ -630,13 +632,12 @@ void RebuildLibraryAndRegions(const std::string& /*ignored*/) {
   const std::size_t loaded = g_lib.ScanFolder(dir, GetFps(), &log);
   g_lib.BuildRegions(GetFps(), GetGap(), 0.0);
   // v0.12.0-alpha.1: scan log includes per-animation "top active bones"
-  // summaries. Surface to console (always-on) so the user can sanity-check
-  // motion data on freshly-loaded files. Will move to overlay UI in alpha.2.
+  // summaries. v0.12.0-alpha.6: kept the log itself (visible if the
+  // console is open) but removed the ForceShowReaperConsole pop — it was
+  // intrusive on every project load / hot-reload and the data is now
+  // surfaced via the placed envelopes anyway.
   if (!log.empty()) {
     SpikeLog(log);
-    // Force REAPER's console window open so the motion summary is
-    // immediately visible. Safe even if user had the console hidden.
-    ForceShowReaperConsole();
   }
   ConsoleLog("[holoroll] library: " + std::to_string(loaded) +
              " animation(s), " + std::to_string(g_lib.Regions().size()) + " region(s) prepared.\n");
@@ -949,33 +950,19 @@ double FindLastRegionEnd() {
   return last;
 }
 
-// v0.9.1: ensure there's a fresh track at index 0 (top of REAPER's track
-// list) and return it. Used by all "place items" code paths so newly-imported
-// animations always land on a clean dedicated row instead of mixing with
-// the user's existing tracks.
+// ---- v0.9.1 / v0.12.0-alpha.6 items + motion track ----------------------
 //
-// We always create a new one rather than reusing track 0 — the user's
-// project may already have content on track 0 that we shouldn't disturb,
-// and visually "new track on top" is a clear signal that something arrived.
-MediaTrack* EnsureTrackOnTop() {
-  const auto& api = g_bridge.Api();
-  if (!api.insertTrackAtIndex || !api.getTrack) return nullptr;
-  api.insertTrackAtIndex(0, true);
-  return api.getTrack(nullptr, 0);
-}
-
-// ---- v0.12.0-alpha.4 motion track + JSFX hosting --------------------------
+// HoloRoll places everything on a single persistent track named
+// "HoloRoll": the animation media items, the holoroll_motion JSFX, and
+// (via the JSFX) the per-bone motion-analysis envelopes. v0.9.1 used to
+// create a fresh top track per placement call (no name); alpha.5 added a
+// separate "HoloRoll Motion" track at the bottom for the JSFX +
+// envelopes. alpha.6 collapses both into one persistent track — the
+// layout users actually expect.
 //
-// HoloRoll uses a dedicated track named "HoloRoll Motion" to host the
-// motion-analysis envelopes. The track itself only exists as a parameter
-// host; nothing routes audio through it. The actual envelope target is the
-// holoroll_motion JSFX (16 sliders, 0..1) inserted on the track's regular
-// FX chain.
-//
-// Both EnsureMotionTrack and EnsureMotionFx are idempotent — they only
-// create what's missing. Pressing "Setup motion track" multiple times is
-// safe and a no-op after the first successful call.
-constexpr char kMotionTrackName[] = "HoloRoll Motion";
+// EnsureTrackOnTop is now find-or-create-by-name: subsequent placements
+// land on the same row, envelopes carry over, no track stacking.
+constexpr char kItemsTrackName[] = "HoloRoll";
 // Names by which TrackFX_AddByName might find our JSFX. We try them in
 // order; the first one that succeeds wins.
 //
@@ -1023,48 +1010,50 @@ MediaTrack* FindTrackByName(const std::string& name) {
   return nullptr;
 }
 
-// Find the existing "HoloRoll Motion" track, or create a new one at the
-// bottom of the track list and name it. Returns nullptr if the track
-// can't be created (API missing, etc.).
+// Find the existing "HoloRoll" track, or create one at the top of the
+// project track list and name it. Returns nullptr if the track can't be
+// created (API missing, etc.).
 //
-// Why bottom (not top): the top track is reserved for animation items via
-// EnsureTrackOnTop() — the user expects new animations to appear there.
-// Putting motion at the bottom keeps the two clearly separated and means
-// the motion track is out of the way visually until the user wants it.
-MediaTrack* EnsureMotionTrack() {
-  if (MediaTrack* existing = FindTrackByName(kMotionTrackName)) return existing;
+// v0.9.1 always created a new top track per call (anonymous); alpha.6
+// switched to find-or-create-by-name so items + envelopes accumulate on a
+// single persistent row instead of stacking new tracks. Risk: if the user
+// has their own track literally named "HoloRoll" we'd hijack it — name is
+// specific enough that this is acceptable.
+MediaTrack* EnsureTrackOnTop() {
+  if (MediaTrack* existing = FindTrackByName(kItemsTrackName)) return existing;
 
   const auto& api = g_bridge.Api();
-  if (!api.insertTrackAtIndex || !api.countTracks || !api.getTrack ||
+  if (!api.insertTrackAtIndex || !api.getTrack ||
       !api.getSetMediaTrackInfo_String) {
     return nullptr;
   }
 
-  // Insert at the end. countTracks() returns the count BEFORE insertion;
-  // passing that as the index appends.
-  const int insertIdx = api.countTracks(nullptr);
-  api.insertTrackAtIndex(insertIdx, true);
-  MediaTrack* track = api.getTrack(nullptr, insertIdx);
+  // Insert at index 0 (top). The new track becomes track 0; existing
+  // tracks shift down by one.
+  api.insertTrackAtIndex(0, true);
+  MediaTrack* track = api.getTrack(nullptr, 0);
   if (!track) return nullptr;
 
-  // Set the name. P_NAME setter wants a writable buffer.
+  // Set the name so subsequent calls find it by name. P_NAME setter wants
+  // a writable buffer.
   char buf[256];
-  std::snprintf(buf, sizeof(buf), "%s", kMotionTrackName);
+  std::snprintf(buf, sizeof(buf), "%s", kItemsTrackName);
   api.getSetMediaTrackInfo_String(track, "P_NAME", buf, true);
 
   return track;
 }
 
-// Insert the holoroll_motion JSFX on the motion track if it isn't already
-// there. Returns the FX index on success, or -1 on failure.
+// Insert the holoroll_motion JSFX on the given track if it isn't already
+// there. Returns the FX index on success, or -1 on failure (e.g. JSFX
+// not installed, REAPER hasn't rescanned plug-ins).
 //
 // We try multiple name forms (see kMotionFxNameCandidates) because
 // REAPER's JSFX name-resolution behaviour for TrackFX_AddByName varies
 // between versions and on whether the JSFX lives in a subfolder.
 //
 // instantiate=-1 means "add only if not already present, return existing
-// index if found." This is the right idempotent semantic for our use:
-// pressing the button multiple times shouldn't create stacked copies.
+// index if found." Idempotent: calling repeatedly is safe and a no-op
+// after the first successful insert.
 int EnsureMotionFx(MediaTrack* track) {
   if (!track) return -1;
   const auto& api = g_bridge.Api();
@@ -1078,46 +1067,282 @@ int EnsureMotionFx(MediaTrack* track) {
   }
 
   // Second pass: actually add. instantiate=-1 = add-or-find. The first
-  // candidate that succeeds is our winner. We log which one worked at
-  // SetupMotionTrack level so the user (and we) can see it.
+  // candidate that succeeds is our winner.
   for (const char* name : kMotionFxNameCandidates) {
     const int idx = api.trackFX_AddByName(track, name, false, -1);
-    if (idx >= 0) {
-      SpikeLog(std::string("[holoroll] inserted JSFX using name '") +
-               name + "' at FX index " + std::to_string(idx) + ".\n");
-      return idx;
-    }
+    if (idx >= 0) return idx;
   }
   return -1;
 }
 
-// User-facing entry point: ensure the motion track exists, ensure the JSFX
-// is on it, log status. If the JSFX is missing from REAPER (e.g. the user
-// hasn't restarted REAPER after install), TrackFX_AddByName returns -1 and
-// we tell the user explicitly so they know to rescan FX.
-void SetupMotionTrack() {
+// ---- v0.12.0-alpha.5/.6/.7 motion envelope writing ----------------------
+//
+// Pipeline:
+//   1. EnsureItemsTrackAndFx()                  -> (track, fxIdx)
+//   2. For each placed item, pick top-N active world bones, compute the
+//      item's shared min/max across those bones, then for each:
+//      WriteMotionEnvelopeForBone(..., sharedMin, sharedMax)
+//   3. WriteMotionEnvelopeForBone surgically clears [item.start, item.end]
+//      before writing, then flips VIS=1 on the envelope chunk so the
+//      lane appears immediately (alpha.7 — REAPER otherwise leaves the
+//      envelope hidden until the user opens the FX dialog).
+//
+// Slider semantics:
+//   slider 1 = top-1 most-active world-motion bone of THIS item
+//   slider 2 = top-2 same
+//   slider 3 = top-3 same
+// Different items may map different bones onto the same slider; that's by
+// design. Sliders 4..16 are reserved for future uses (local motion,
+// manual selection).
+//
+// Normalisation history:
+//   - alpha.5: per-bone peak. Every slider hit 1.0 regardless of how
+//     active its bone actually was — visually all three were identical
+//     and made comparison impossible.
+//   - alpha.6: shared peak across the item's selected bones. Preserved
+//     relative magnitudes (slider 1 highest, 2/3 smaller) but values
+//     clustered near 1.0 when motion was relatively uniform — curve
+//     looked flat, dynamic range wasted.
+//   - alpha.7: shared min/max stretching. Slider 1 spans the full
+//     [0, 1] range; sliders 2/3 stay in proportion to bone 1 but use
+//     the same scale. Envelope visually fills the lane and reads
+//     usefully even when the underlying motion is quasi-uniform.
+constexpr int kMotionTopN = 3;  // sliders 1..3 used; 4..16 reserved.
+// JSFX slider numbers are 1-based in the .jsfx file but the FX parameter
+// indices we pass to GetFXEnvelope are 0-based. slider1 == paramIdx 0.
+constexpr int kMotionFirstParamIdx = 0;
+
+// Combined wrapper used by all placement paths: find-or-create the
+// "HoloRoll" track and ensure the holoroll_motion JSFX is on it. Returns
+// {track, fxIdx}; track is nullptr only if track creation itself failed.
+// If the track succeeds but the JSFX fails to load (e.g. user hasn't
+// rescanned plug-ins after install), out.fxIdx stays -1 — callers can
+// still place items, just no envelopes.
+struct MotionFxLocation {
+  MediaTrack* track = nullptr;
+  int fxIdx = -1;
+};
+MotionFxLocation EnsureItemsTrackAndFx() {
+  MotionFxLocation out;
+  out.track = EnsureTrackOnTop();
+  if (!out.track) return out;
+  out.fxIdx = EnsureMotionFx(out.track);
+  return out;
+}
+
+// Pick the top-N most-active bones from a motion vector (worldMotion or
+// localMotion). Sorted descending by absolute-sum of per-frame motion.
+// Returns indices into `motion`. Bones with zero motion are excluded.
+//
+// alpha.8: rank by sum of |motion[f]|, not raw sum, because the new
+// signed-projection metric can have sum ≈ 0 for symmetric oscillation
+// (positive frames cancel negative ones), which would mark active
+// bones as static. Sum of absolutes is order-of-magnitude equivalent
+// to total displacement and works for both signed and unsigned data.
+std::vector<std::size_t> TopNActiveBones(const std::vector<std::vector<float>>& motion,
+                                          std::size_t topN) {
+  struct Pair { std::size_t idx; float total; };
+  std::vector<Pair> rank;
+  rank.reserve(motion.size());
+  for (std::size_t j = 0; j < motion.size(); ++j) {
+    float sum = 0.0f;
+    for (float v : motion[j]) sum += std::fabs(v);
+    if (sum > 1e-6f) rank.push_back({j, sum});
+  }
+  if (rank.empty()) return {};
+  // Partial-sort top-N descending.
+  const std::size_t take = std::min(topN, rank.size());
+  std::partial_sort(rank.begin(), rank.begin() + take, rank.end(),
+                    [](const Pair& a, const Pair& b) { return a.total > b.total; });
+  std::vector<std::size_t> out;
+  out.reserve(take);
+  for (std::size_t i = 0; i < take; ++i) out.push_back(rank[i].idx);
+  return out;
+}
+
+// v0.12.0-alpha.7: flip the envelope's VIS flag to 1 so the lane shows
+// up on the track without the user having to open the FX window.
+// GetFXEnvelope(create=true) creates the envelope but defaults VIS to 0
+// — the data is there, the lane just isn't drawn. We modify the state
+// chunk's "VIS X Y Z" line in place (X = visibility, Y = lane in track
+// view, Z = height factor) and write it back.
+//
+// alpha.7 hotfix details (lessons-learned):
+//   - 1MB buffer (64KB was too small for accumulated envelopes).
+//   - VIS line search is CR/LF agnostic (REAPER on Windows uses CRLF).
+//   - Insert a fresh VIS line after <PARMENV if the chunk doesn't have
+//     one yet — terse newly-created envelopes lack it.
+//   - ALWAYS overwrite VIS, even if it's already "1 1 1": empirically
+//     the SetEnvelopeStateChunk call itself is what triggers REAPER's
+//     redraw. Skipping the rewrite hides the visibility fix.
+bool FindLineStart(const std::string& s, const std::string& token, std::size_t& outPos) {
+  std::size_t p = 0;
+  while (true) {
+    p = s.find(token, p);
+    if (p == std::string::npos) return false;
+    if (p == 0 || s[p - 1] == '\n' || s[p - 1] == '\r') {
+      outPos = p;
+      return true;
+    }
+    ++p;
+  }
+}
+
+void EnsureEnvelopeVisible(TrackEnvelope* env, int paramIdx) {
   const auto& api = g_bridge.Api();
+  if (!env || !api.getEnvelopeStateChunk || !api.setEnvelopeStateChunk) return;
 
-  MediaTrack* track = EnsureMotionTrack();
-  if (!track) {
-    SpikeLog("[holoroll] FAIL: could not create or find HoloRoll Motion track. "
-             "REAPER API for tracks may be incomplete.\n");
+  static constexpr int kBuf = 1024 * 1024;  // 1 MB — handles big chunks.
+  std::vector<char> buf(kBuf);
+  if (!api.getEnvelopeStateChunk(env, buf.data(), kBuf, /*isundo=*/false)) {
+    SpikeLog("[holoroll] envelope p" + std::to_string(paramIdx) +
+             ": GetEnvelopeStateChunk failed (chunk > 1MB?)\n");
     return;
   }
 
-  const int fxIdx = EnsureMotionFx(track);
-  if (fxIdx < 0) {
-    SpikeLog("[holoroll] FAIL: could not insert holoroll_motion JSFX. "
-             "REAPER may need to rescan FX (Options \u2192 Preferences \u2192 "
-             "Plug-ins \u2192 Re-scan), or restart REAPER. "
-             "Verify the JSFX is at %APPDATA%\\REAPER\\Effects\\HoloRoll\\holoroll_motion.jsfx.\n");
-    return;
+  std::string s(buf.data());
+  std::size_t visPos;
+  if (FindLineStart(s, "VIS ", visPos)) {
+    // Always overwrite VIS line — empirically the SetEnvelopeStateChunk
+    // call itself is what triggers REAPER to redraw the lane, even when
+    // VIS was already 1. An "already 1, skip" optimisation here hid the
+    // visibility fix during alpha.7 testing.
+    std::size_t lineEnd = visPos;
+    while (lineEnd < s.size() && s[lineEnd] != '\r' && s[lineEnd] != '\n') ++lineEnd;
+    s.replace(visPos, lineEnd - visPos, "VIS 1 1 1.0");
+  } else {
+    std::size_t hdrEnd = s.find('\n');
+    if (hdrEnd == std::string::npos) return;
+    s.insert(hdrEnd + 1, "VIS 1 1 1.0\n");
   }
 
-  SpikeLog("[holoroll] motion track ready: '" + std::string(kMotionTrackName) +
-           "' has the holoroll_motion JSFX at FX index " +
-           std::to_string(fxIdx) + ".\n");
-  if (api.updateArrange) api.updateArrange();
+  if (!api.setEnvelopeStateChunk(env, s.c_str(), /*isundo=*/false)) {
+    SpikeLog("[holoroll] envelope p" + std::to_string(paramIdx) +
+             ": SetEnvelopeStateChunk failed\n");
+  }
+}
+
+// Write one bone's motion curve into one FX-parameter envelope.
+//
+// Pipeline as of alpha.8:
+//   - Caller passes shared min/max bounds (5th and 95th percentile of
+//     the item's selected-bone motion values). We map every frame via
+//     (motion[f] - sharedMin) / (sharedMax - sharedMin), clamped to
+//     [0, 1]. Outliers below p5 or above p95 hit the clamp limits.
+//   - motion[f] is the SIGNED principal-axis projection produced by
+//     glb_loader's projectSigned post-process (alpha.8): one sine wave
+//     per actual oscillation, not the rectified 2x metric we used
+//     before.
+//   - Frame 0 is now valid data (no bake artifact), so no forward-fill.
+//   - Surgical clear of [item.start, item.end] before writing.
+//   - Calls EnsureEnvelopeVisible after writing so the lane shows up
+//     without the user manually opening the FX window.
+// Linear shape (shape=0). Returns false on missing API or bad inputs.
+bool WriteMotionEnvelopeForBone(MediaTrack* track, int fxIdx, int paramIdx,
+                                const std::vector<float>& motion,
+                                double itemStartSec, double fps,
+                                float sharedMin, float sharedMax) {
+  const auto& api = g_bridge.Api();
+  if (!api.getFXEnvelope || !api.insertEnvelopePoint ||
+      !api.envelope_SortPoints || !api.deleteEnvelopePointRange) {
+    return false;
+  }
+  if (!track || fxIdx < 0 || motion.empty() || fps <= 0.0) return false;
+
+  TrackEnvelope* env = api.getFXEnvelope(track, fxIdx, paramIdx, /*create=*/true);
+  if (!env) return false;
+
+  const std::size_t nFrames = motion.size();
+  const double durationSec = static_cast<double>(nFrames) / fps;
+  const double clearStart = itemStartSec;
+  const double clearEnd = itemStartSec + durationSec;
+
+  // Wipe the target region first.
+  api.deleteEnvelopePointRange(env, clearStart, clearEnd);
+
+  // Min-max stretch denominator. If degenerate (all selected bones
+  // static or all frames identical), write 0s — nothing meaningful to
+  // display.
+  const float range = sharedMax - sharedMin;
+  const bool degenerate = range < 1e-6f;
+  const float invRange = degenerate ? 0.0f : (1.0f / range);
+
+  // alpha.8: motion is now SIGNED projection onto the joint's principal
+  // axis (computed in glb_loader's post-process pass). Frame 0 has a
+  // valid value (no longer the spurious 0 from rectified |speed|), so
+  // the alpha.6/.7 forward-fill workaround is gone.
+
+  // Batch-insert all points with noSortIn=true; sort once at the end.
+  bool noSort = true;
+  for (std::size_t f = 0; f < nFrames; ++f) {
+    const double t = itemStartSec + static_cast<double>(f) / fps;
+    // Min-max stretch into [0, 1]. Clamp defensively for outlier
+    // frames (those below 5th or above 95th percentile).
+    double v = degenerate ? 0.0
+                          : static_cast<double>((motion[f] - sharedMin) * invRange);
+    if (v < 0.0) v = 0.0;
+    else if (v > 1.0) v = 1.0;
+    api.insertEnvelopePoint(env, t, v, /*shape=*/0, /*tension=*/0.0,
+                            /*selected=*/false, &noSort);
+  }
+  api.envelope_SortPoints(env);
+  // alpha.7: make the envelope lane visible immediately.
+  EnsureEnvelopeVisible(env, paramIdx);
+  return true;
+}
+
+// For one placed item, write top-3 world-motion envelopes onto sliders
+// 1..3. All three sliders share the SAME min/max bounds (computed
+// across the three selected bones for this item), so:
+//   - the envelope visually spans the slider's full [0, 1] range
+//     (alpha.6's pure-peak normalisation clustered values near 1 when
+//     motion was relatively uniform — alpha.7 stretches dynamic range
+//     to the slider edges);
+//   - relative magnitudes between bones are still preserved (slider 1
+//     reaches the top, sliders 2/3 stay proportional within the same
+//     scale).
+//
+// Note: frame 0 is handled inside WriteMotionEnvelopeForBone (forward-
+// filled with motion[1]) but is NOT included in min/max computation
+// here — its value is 0 from the bake loop and would skew sharedMin
+// downward by exactly that artefact we're trying to ignore.
+void WriteMotionEnvelopesForItem(MediaTrack* motionTrack, int fxIdx,
+                                 const LoadedAnimation& anim,
+                                 double itemStartSec, double fps) {
+  if (anim.worldMotion.empty()) return;
+  const std::vector<std::size_t> topBones = TopNActiveBones(anim.worldMotion, kMotionTopN);
+  if (topBones.empty()) return;
+
+  // alpha.7 hotfix: percentile-based bounds instead of raw min/max.
+  // Empirically rest-pose frames (motion=0 at start of animation) pulled
+  // sharedMin to 0 and the min-max stretch collapsed back to peak
+  // normalisation. 5th/95th percentiles skip those outliers and give
+  // the bulk of the curve usable dynamic range. Frames outside the
+  // bounds get clamped to [0, 1] in WriteMotionEnvelopeForBone.
+  std::vector<float> all;
+  for (std::size_t boneIdx : topBones) {
+    const auto& m = anim.worldMotion[boneIdx];
+    for (std::size_t f = 1; f < m.size(); ++f) {  // skip frame 0
+      all.push_back(m[f]);
+    }
+  }
+  if (all.empty()) return;
+  std::sort(all.begin(), all.end());
+
+  const std::size_t loIdx = (all.size() * 5) / 100;
+  const std::size_t hiIdx = (all.size() * 95) / 100;
+  const float sharedMin = all[std::min(loIdx, all.size() - 1)];
+  const float sharedMax = all[std::min(hiIdx, all.size() - 1)];
+  if (!std::isfinite(sharedMin) || !std::isfinite(sharedMax)) return;
+
+  for (std::size_t k = 0; k < topBones.size() && k < static_cast<std::size_t>(kMotionTopN); ++k) {
+    const std::size_t boneIdx = topBones[k];
+    const int paramIdx = kMotionFirstParamIdx + static_cast<int>(k);
+    WriteMotionEnvelopeForBone(motionTrack, fxIdx, paramIdx,
+                               anim.worldMotion[boneIdx],
+                               itemStartSec, fps,
+                               sharedMin, sharedMax);
+  }
 }
 
 // v0.11.1: build a variation name with zero-padded 2-digit suffix.
@@ -1356,7 +1581,10 @@ void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
   g_viewport.GetPlacementOptions(&variations, &preRoll_unused,
                                  &postRoll_unused, &regionOverhang);
 
-  MediaTrack* targetTrack = EnsureTrackOnTop();
+  // v0.12.0-alpha.6: items, JSFX and envelopes all live on the same
+  // persistent "HoloRoll" track now. Find-or-create + add JSFX in one go.
+  MotionFxLocation loc = EnsureItemsTrackAndFx();
+  MediaTrack* targetTrack = loc.track;
   if (!targetTrack) {
     SpikeLog("[holoroll] cannot place items: failed to create track.\n");
     return;
@@ -1374,6 +1602,7 @@ void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
 
   std::size_t placed = 0;
   std::size_t skipped = 0;
+
   for (std::size_t i = 0; i < g_lib.Count(); ++i) {
     const LoadedAnimation& anim = g_lib.At(i);
     const double duration = anim.DurationSeconds(fps);
@@ -1394,6 +1623,13 @@ void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
         api.addProjectMarker2(nullptr, true, cursor,
                               cursor + duration + regionOverhang,
                               regionName.c_str(), -1, color);
+        // v0.12.0-alpha.5/.6: write motion envelopes for this item.
+        // Surgical clear in [item.start, item.end] keeps envelopes for
+        // previously-placed items intact (track is persistent).
+        if (loc.fxIdx >= 0) {
+          WriteMotionEnvelopesForItem(targetTrack, loc.fxIdx,
+                                      anim, cursor, fps);
+        }
         ++placed;
         // Add to existing-names so later variations of the same anim
         // (within this Place all run) also de-dup correctly.
@@ -1435,7 +1671,9 @@ void PlacePendingAtCursor() {
   g_viewport.GetPlacementOptions(&variations, &preRoll_unused,
                                  &postRoll_unused, &regionOverhang);
 
-  MediaTrack* track = EnsureTrackOnTop();
+  // v0.12.0-alpha.6: items + JSFX on the same persistent "HoloRoll" track.
+  MotionFxLocation loc = EnsureItemsTrackAndFx();
+  MediaTrack* track = loc.track;
   if (!track) {
     SpikeLog("[holoroll] cannot place: failed to create track.\n");
     g_pendingNewAnimations.clear();
@@ -1453,6 +1691,7 @@ void PlacePendingAtCursor() {
 
   std::size_t placed = 0;
   std::size_t skipped = 0;
+
   for (const std::string& basename : g_pendingNewAnimations) {
     const std::size_t idx = g_lib.FindAnimationIndexByBasename(basename);
     if (idx == std::numeric_limits<std::size_t>::max()) continue;
@@ -1474,6 +1713,11 @@ void PlacePendingAtCursor() {
           api.addProjectMarker2(nullptr, true, pos,
                                 pos + duration + regionOverhang,
                                 regionName.c_str(), -1, color);
+        }
+        // v0.12.0-alpha.5/.6: surgical motion envelope write.
+        if (loc.fxIdx >= 0) {
+          WriteMotionEnvelopesForItem(track, loc.fxIdx,
+                                      anim, pos, fps);
         }
         ++placed;
         existingNames.push_back(itemName);
@@ -1500,7 +1744,9 @@ void PlaceSingleAtCursor(const std::string& basename) {
   g_viewport.GetPlacementOptions(&variations_unused, &preRoll_unused,
                                  &postRoll_unused, &regionOverhang);
 
-  MediaTrack* track = EnsureTrackOnTop();
+  // v0.12.0-alpha.6: items + JSFX on the same persistent "HoloRoll" track.
+  MotionFxLocation loc = EnsureItemsTrackAndFx();
+  MediaTrack* track = loc.track;
   if (!track) return;
 
   const std::size_t idx = g_lib.FindAnimationIndexByBasename(basename);
@@ -1521,6 +1767,11 @@ void PlaceSingleAtCursor(const std::string& basename) {
     api.addProjectMarker2(nullptr, true, pos,
                           pos + duration + regionOverhang,
                           regionName.c_str(), -1, color);
+  }
+  // v0.12.0-alpha.5/.6: motion envelopes for this single item.
+  if (item && loc.fxIdx >= 0) {
+    WriteMotionEnvelopesForItem(track, loc.fxIdx,
+                                anim, pos, GetFps());
   }
   if (api.updateArrange) api.updateArrange();
 }
@@ -1912,13 +2163,6 @@ void OnTimer() {
   if (req.reloadConfig) ReloadConfigFromDisk();
   if (req.spikeTestCreateItem) SpikeTestCreateItem();
   if (req.resetFolderOverride) ResetFolderToProjectDefault();
-
-  // v0.12.0-alpha.4: motion track + JSFX hosting setup. The actual
-  // envelope writing for selected bones lands in alpha.5.
-  if (req.setupMotionTrack) {
-    SetupMotionTrack();
-    ForceShowReaperConsole();  // Show success/failure log to user.
-  }
 
   // Handle the new-animations modal response.
   if (req.newAnimationsChoice == 1) {
