@@ -70,6 +70,21 @@ jobs:
           New-Item -ItemType Directory -Force -Path installer\payload | Out-Null
           Copy-Item build\x64-Release\Release\reaper_holoroll.dll installer\payload\ -Force
 
+          # v0.12.0-alpha.3: bundled JSFX assets. Must mirror what
+          # scripts\build_installer.ps1 does locally; otherwise ISCC fails
+          # at holoroll.iss line 95 ("No files found matching
+          # ...payload\effects\HoloRoll\*"). Single source of truth for the
+          # staging logic should eventually be the script itself — left as
+          # a follow-up; for now we duplicate the copy here.
+          $jsfxSrc = "assets\effects\HoloRoll"
+          if (-not (Test-Path $jsfxSrc)) {
+            throw "JSFX source folder missing at $jsfxSrc"
+          }
+          $jsfxDest = "installer\payload\effects\HoloRoll"
+          New-Item -ItemType Directory -Force -Path $jsfxDest | Out-Null
+          Copy-Item -Path "$jsfxSrc\*" -Destination $jsfxDest -Recurse -Force
+          Write-Host "Staged JSFX assets to $jsfxDest"
+
       - name: Locate or install Inno Setup
         shell: pwsh
         run: |
