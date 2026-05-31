@@ -30,10 +30,11 @@ class GlViewport {
     // Per-triangle face normals computed by AnimationLibrary on rest pose.
     const std::vector<float>* restNormals = nullptr;
 
-    // When non-empty, the overlay shows a modal dialog asking the user
-    // whether to place regions for these newly-discovered animations.
-    // entry.cpp populates this from the folder watcher; the user's
-    // response comes back via OverlayRequests.newAnimationsChoice.
+    // v0.12.0-alpha.10: the "new animations detected" modal was removed
+    // in favour of automatic placement. This field still exists for
+    // API compatibility but should normally be empty by the time the
+    // UI renders (PlacePendingAtCursor consumes the queue synchronously
+    // in ProcessWatcherEvents).
     std::vector<std::string> pendingNewAnimations;
 
     // Non-empty iff an item is under the playhead but its name does not
@@ -73,15 +74,21 @@ class GlViewport {
   // <project>/Animations/). Only meaningful when the override is set.
   bool resetFolderOverride = false;
 
-    // Choice from the "new animations detected" modal.
-    // 0 = no choice yet (modal still open or never shown).
-    // 1 = "Place all" — append regions for all pending new animations.
-    // 2 = "Skip" — dismiss the modal, leave regions alone.
+    // v0.12.0-alpha.10: previously: choice from "new animations detected"
+    // modal. Modal is gone (auto-placement). Field kept as dead for now
+    // to avoid breaking external code that might read it; safe to drop
+    // in a follow-up cleanup along with DrawNewAnimationsModal().
     int newAnimationsChoice = 0;
 
     // Non-empty if the user pressed "+ Place" next to a library entry.
     // entry.cpp uses this to call PlaceSingleAtCursor(name).
     std::string placeSingleAtCursor;
+
+    // v0.12.0-alpha.9: user pressed "Generate motion markers". entry.cpp
+    // walks every placed HoloRoll item, runs the active motion-event
+    // detector on the item's top-1 active bone, and writes REAPER
+    // project markers at the detected event times.
+    bool generateMotionMarkers = false;
   };
 
   bool Open();
@@ -110,8 +117,10 @@ class GlViewport {
 
   // ---- v0.11.0 placement options (transient state owned by GlViewport,
   //      persisted via Set/GetPlacementOptions — mirrors Scene settings) ---
-  void SetPlacementOptions(int variations, float preRollSec, float postRollSec, float regionOverhangSec);
-  void GetPlacementOptions(int* variations, float* preRollSec, float* postRollSec, float* regionOverhangSec) const;
+  // alpha.10: signature reduced to pre/post-roll only. Variations and
+  // region overhang were dropped along with their UI fields.
+  void SetPlacementOptions(float preRollSec, float postRollSec);
+  void GetPlacementOptions(float* preRollSec, float* postRollSec) const;
   bool ConsumePlacementDirty();
 
   // ---- Scene settings (persisted in holoroll_config.ini) -----------------
@@ -194,16 +203,13 @@ class GlViewport {
   bool showReferenceHuman_ = true;
 
   // v0.11.0 placement options. Edited via the "Place all" overlay row;
-  // entry.cpp persists them to holoroll_config.ini and stamps the actual
-  // pre/post-roll values on each created item via P_EXT.
-  //   placementVariations_   - 1..N copies per animation (1 = no variations)
+  // entry.cpp persists them to holoroll_config.ini.
   //   placementPreRollSec_   - hold-frame seconds before the animation
   //   placementPostRollSec_  - hold-frame seconds after the animation
-  //   placementRegionOverhang_ - region extends this far past item end
-  int   placementVariations_ = 1;
+  // alpha.10: placementVariations_ / placementRegionOverhang_ removed
+  // along with their UI fields and the region-creation step.
   float placementPreRollSec_ = 1.0f;
   float placementPostRollSec_ = 1.0f;
-  float placementRegionOverhang_ = 0.5f;
   bool  placementDirty_ = false;
 
   // -------- Input state --------

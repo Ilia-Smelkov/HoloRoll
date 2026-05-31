@@ -7,6 +7,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.10] — 2026-05-08
+
+Placement workflow simplification. Three friction points dropped:
+auto-created regions, variation count, and the "new animations detected"
+confirmation modal.
+
+### Removed
+- **Auto-creation of regions alongside items.** Placement (Place all /
+  hot-reload / +Place) no longer calls `AddProjectMarker2(isrgn=true)`.
+  Items still appear on the HoloRoll track exactly as before; the
+  paired purple region is gone. The "Region overhang" placement option
+  is removed from the overlay since it had no surviving consumer.
+  - Legacy regions from earlier versions are still cleaned up on the
+    first Place all run after upgrade (`DeleteOurRegions()` still runs
+    once at the start) so users don't end up with orphaned content.
+- **Variations count.** The "Variations" inline field is removed.
+  Placement always creates one item per animation. `MakeVariationName`
+  utility is kept (still used by suffix-stripping resolution) but no
+  longer called from placement paths.
+- **"New animations detected" modal.** When the folder watcher reports
+  new files, placement now happens automatically — no popup, no
+  Place all / Skip prompt. The detection log line still appears in
+  the REAPER console.
+
+### Changed
+- `GlViewport::SetPlacementOptions` / `GetPlacementOptions` signatures
+  reduced to `(preRollSec, postRollSec)` — variations and region
+  overhang parameters removed.
+- New helper `FindLastHoloRollItemEnd()` (in `entry.cpp`) replaces
+  `FindLastRegionEnd()` as the anchor for "where does the next item
+  go". Since we don't create regions anymore, region-end was no
+  longer a usable proxy. The old `FindLastRegionEnd` is kept for
+  legacy compatibility (and as a building block of `DeleteOurRegions`).
+
+### Migration
+- Existing projects with HoloRoll regions get them wiped on the first
+  Place all run after upgrade. Items remain untouched. If you've been
+  relying on the regions for grouping, this is a breaking change —
+  recreate them manually via REAPER's region tools.
+- Config keys `placement.variations` and `placement.region_overhang_seconds`
+  are no longer read or written. Existing values in `holoroll_config.ini`
+  are silently ignored; nothing to migrate.
+
+### Internal
+- `pendingNewAnimations` / `newAnimationsChoice` fields and
+  `DrawNewAnimationsModal()` helper kept as dead code for now,
+  documented as removable. Avoids touching too many API consumers in
+  one release; final cleanup later.
+
+
+## [0.12.0-alpha.9] — 2026-05-08
+
+Motion data starts driving REAPER markers — first user-facing payoff of
+the alpha.1..alpha.8 analysis pipeline.
+
+### Added
+- **Pluggable motion-event detector framework.** New module
+  `src/core/motion_events.{h,cpp}` defines `IMotionEventDetector` and a
+  registry. Detectors transform per-frame motion curves (alpha.8 signed
+  projection) into timestamped events: `start`, `peak_hi`, `peak_lo`,
+  `zero_cross`, `end`. The framework is engine-agnostic: no REAPER, no
+  UI dependencies — pure float-in / events-out, trivially testable.
+- **First detector: `RigidMechanismDetector`.** Tuned for purposeful
+  mechanical motion — doors, levers, drawers, switches. Algorithm:
+  - Hysteresis-gated activity detection: enter at 10% of bone peak,
+    exit at 5%, with a 3-frame end-confirmation window.
+  - Local extrema (peak_hi / peak_lo) inside active phases — three-
+    point sign-change of differences.
+  - Zero crossings (signed motion through trajectory mean) anywhere
+    on the curve.
+  - 3-frame moving-average smoothing kills single-frame noise without
+    shifting extrema by more than ~1 frame.
+  - 3-frame minimum separation between events of the same type
+    (debounce).
+- **"Generate motion markers" button** in the Library section of the
+  overlay. Walks every placed HoloRoll item, runs the active detector
+  on its top-1 active world-motion bone, and writes REAPER project
+  markers at the detected events. Markers are named
+  `<itemname>:<eventtype>` (e.g. `door_open:start`,
+  `door_open:peak_hi`, `door_open:zero_cross`). Re-running surgically
+  clears prior HoloRoll markers in each item's range and rewrites
+  them — non-HoloRoll markers anywhere on the timeline are untouched.
+- **Console summary** on each generation: number of markers, items
+  processed, items skipped (no resolvable animation), and which
+  detector ran.
+
+### Internal
+- New CMake source `src/core/motion_events.cpp`.
+- New `OverlayRequests.generateMotionMarkers` flag, dispatched in
+  `OnTimer`.
+- `EnumProjectItems` (existing) is now also the input for marker
+  generation, mirroring how `WriteMotionEnvelopesForItem` consumes
+  `LoadedAnimation::worldMotion`.
+
+### Inspirations / non-reinvention
+- The detector contract mirrors how Unreal Engine's Animation
+  Modifiers (e.g. `FootstepAnimEventsModifier`) bake event tracks
+  offline from per-frame bone data. We borrowed the registry +
+  pluggable-algorithm pattern, the hysteresis-gated activity
+  detection from Epic's footstep modifier, and the zero-crossing-of-
+  signed-signal idea from gportelli's `FootSyncMarkers` community
+  modifier.
+
+### Known limitations
+- Top-1 bone only (one stream of markers per item). Top-N marker
+  generation lands in alpha.10.
+- Hardcoded thresholds tuned for hinge-style motion at 24-60 fps.
+  Footsteps, full-body locomotion, very small movements will need a
+  separate detector — the framework is now in place to add them.
+- Algorithm choice is hardcoded to `rigid_mechanism`. UI dropdown
+  arrives with the second detector (alpha.10+).
+- Markers don't move with their items — moving an item on the
+  timeline strands its markers at their original times. Re-run the
+  button to re-sync.
+
+
 ## [0.12.0-alpha.8] — 2026-05-08
 
 Fundamental change to what motion analysis actually MEASURES.
@@ -1171,7 +1287,9 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.8...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.10...HEAD
+[0.12.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.10
+[0.12.0-alpha.9]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.9
 [0.12.0-alpha.8]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.8
 [0.12.0-alpha.7]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.7
 [0.12.0-alpha.6]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.6

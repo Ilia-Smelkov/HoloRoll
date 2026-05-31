@@ -48,6 +48,7 @@ add_library(reaper_holoroll SHARED
   src/core/config_store.cpp
   src/core/folder_watcher.cpp
   src/core/glb_loader.cpp
+  src/core/motion_events.cpp
   src/render/gl_viewport.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp

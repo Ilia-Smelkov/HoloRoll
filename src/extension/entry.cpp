@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/animation_library.h"
+#include "core/motion_events.h"
 #include "core/config_store.h"
 #include "core/folder_watcher.h"
 #include "core/viewport_poses.h"
@@ -87,10 +88,11 @@ constexpr char kCfgKeySceneShowRefHuman[]   = "scene.show_reference_human";
 // v0.11.0 placement options. Persisted in holoroll_config.ini and read
 // once on viewport open + on Reload config. The user sets them via inline
 // fields next to "Place all".
-constexpr char kCfgKeyPlacementVariations[]    = "placement.variations";
+// alpha.10: kCfgKeyPlacementVariations and kCfgKeyPlacementRegionOverhang
+// constants removed along with the corresponding UI. Stale values in the
+// user's config file are ignored (no reader, no writer).
 constexpr char kCfgKeyPlacementPreRoll[]       = "placement.pre_roll_seconds";
 constexpr char kCfgKeyPlacementPostRoll[]      = "placement.post_roll_seconds";
-constexpr char kCfgKeyPlacementRegionOverhang[] = "placement.region_overhang_seconds";
 
 // Default subfolder name for project-relative animations storage. Convention
 // matches game-industry layouts (Animations/ alongside Audio/, Materials/,
@@ -195,11 +197,12 @@ void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeySceneShowBboxDims))   g_config.SetDouble(kCfgKeySceneShowBboxDims, 1.0);
   if (!g_config.Has(kCfgKeySceneShowGridLabels)) g_config.SetDouble(kCfgKeySceneShowGridLabels, 1.0);
   if (!g_config.Has(kCfgKeySceneShowRefHuman))   g_config.SetDouble(kCfgKeySceneShowRefHuman, 1.0);
-  // v0.11.0: placement defaults match user's stated preference.
-  if (!g_config.Has(kCfgKeyPlacementVariations))     g_config.SetDouble(kCfgKeyPlacementVariations, 1.0);
-  if (!g_config.Has(kCfgKeyPlacementPreRoll))        g_config.SetDouble(kCfgKeyPlacementPreRoll, 1.0);
-  if (!g_config.Has(kCfgKeyPlacementPostRoll))       g_config.SetDouble(kCfgKeyPlacementPostRoll, 1.0);
-  if (!g_config.Has(kCfgKeyPlacementRegionOverhang)) g_config.SetDouble(kCfgKeyPlacementRegionOverhang, 0.5);
+  // v0.11.0 / alpha.10: placement defaults. Variations and region overhang
+  // keys were removed in alpha.10; we no longer seed defaults for them.
+  // Old configs that already have these keys keep them as harmless dead
+  // values (no reader, no writer).
+  if (!g_config.Has(kCfgKeyPlacementPreRoll))   g_config.SetDouble(kCfgKeyPlacementPreRoll, 1.0);
+  if (!g_config.Has(kCfgKeyPlacementPostRoll))  g_config.SetDouble(kCfgKeyPlacementPostRoll, 1.0);
 }
 
 // Read the configured region-name prefix and apply it to the AnimationLibrary
@@ -245,25 +248,24 @@ void PersistSceneSettingsFromViewport() {
   g_config.Save();
 }
 
-// v0.11.0: same shape but for placement options (variations count, pre/post
-// roll, region overhang). Read once on viewport open and on Reload config;
-// persisted whenever the user touches the inline fields in the overlay.
+// v0.11.0: placement options round-tripped between holoroll_config.ini and
+// the viewport's inline fields. Read once on viewport open and on Reload
+// config; persisted whenever the user touches a field.
+//
+// alpha.10: variations + region overhang removed (only pre/post-roll
+// remain). The two legacy config keys are still recognised but no
+// longer surfaced to UI — existing configs upgrade silently.
 void ApplyPlacementOptionsToViewport() {
-  const int variations = static_cast<int>(g_config.GetDouble(kCfgKeyPlacementVariations, 1.0));
   const float preRoll  = static_cast<float>(g_config.GetDouble(kCfgKeyPlacementPreRoll, 1.0));
   const float postRoll = static_cast<float>(g_config.GetDouble(kCfgKeyPlacementPostRoll, 1.0));
-  const float overhang = static_cast<float>(g_config.GetDouble(kCfgKeyPlacementRegionOverhang, 0.5));
-  g_viewport.SetPlacementOptions(variations, preRoll, postRoll, overhang);
+  g_viewport.SetPlacementOptions(preRoll, postRoll);
 }
 
 void PersistPlacementOptionsFromViewport() {
-  int variations = 1;
-  float preRoll = 1.0f, postRoll = 1.0f, overhang = 0.5f;
-  g_viewport.GetPlacementOptions(&variations, &preRoll, &postRoll, &overhang);
-  g_config.SetDouble(kCfgKeyPlacementVariations, static_cast<double>(variations));
+  float preRoll = 1.0f, postRoll = 1.0f;
+  g_viewport.GetPlacementOptions(&preRoll, &postRoll);
   g_config.SetDouble(kCfgKeyPlacementPreRoll, static_cast<double>(preRoll));
   g_config.SetDouble(kCfgKeyPlacementPostRoll, static_cast<double>(postRoll));
-  g_config.SetDouble(kCfgKeyPlacementRegionOverhang, static_cast<double>(overhang));
   g_config.Save();
 }
 
@@ -930,6 +932,11 @@ bool IsHoloRollItem(MediaItem* item) {
 // v0.9.1: find the latest region end across the entire project. Used to
 // place new items right after existing content so we never overlap.
 // Returns 0.0 if no regions exist (placement starts at timeline origin).
+//
+// As of alpha.10 we no longer create regions ourselves (see CHANGELOG),
+// so this helper is kept around only for legacy compatibility (older
+// projects may still have HoloRoll regions). New placement code calls
+// FindLastHoloRollItemEnd instead.
 double FindLastRegionEnd() {
   const auto& api = g_bridge.Api();
   if (!api.enumProjectMarkers3) return 0.0;
@@ -949,6 +956,7 @@ double FindLastRegionEnd() {
   }
   return last;
 }
+
 
 // ---- v0.9.1 / v0.12.0-alpha.6 items + motion track ----------------------
 //
@@ -1463,6 +1471,19 @@ std::vector<DiscoveredItem> EnumProjectItems() {
   return out;
 }
 
+// v0.12.0-alpha.10: latest end-time across all HoloRoll items. Replaces
+// FindLastRegionEnd as the "where does the next item go" anchor — since
+// alpha.10 we stopped creating regions, region-end is no longer a usable
+// proxy for "end of placed content".
+double FindLastHoloRollItemEnd() {
+  const auto items = EnumProjectItems();
+  double last = 0.0;
+  for (const auto& di : items) {
+    if (di.endSeconds > last) last = di.endSeconds;
+  }
+  return last;
+}
+
 // Resolution result. The two flags help OnTimer decide what to surface in
 // the overlay: missing means "item exists but I can't find that animation
 // in the library", which is a useful warning state distinct from "no
@@ -1536,26 +1557,24 @@ ItemResolveResult ResolvePlayheadFromItems(double playheadSeconds,
   return result;
 }
 
-// Replacement for PlaceOurRegions. v0.11.1: for each animation in the
-// library, append `variations` items (with `_02`, `_03` ... suffixes for
-// variation indices >= 2). De-duplicates against existing HoloRoll items:
-// if an item with the exact same name already exists anywhere on the
-// timeline, it's skipped (no duplicate).
+// v0.12.0-alpha.10: place one media item per animation on the persistent
+// HoloRoll track. Auto-region creation was removed in alpha.10 — see
+// CHANGELOG. De-duplicates against existing HoloRoll items: if an item
+// with the exact same name already exists anywhere on the timeline, it
+// gets skipped (no duplicate).
 //
-// Item length = animation duration only (clean, no embedded buffers).
-// Region length = item length + region overhang.
-// Pre/post-roll are global playback-time visual buffers, not part of the
-// item or region geometry. The cursor advances by `duration + gap` between
-// items — also independent of pre/post.
+// Item length = animation duration. Pre/post-roll are global playback-
+// time visual buffers, not part of item geometry. The cursor advances
+// by `duration + gap` between items.
 void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
   const auto& api = g_bridge.Api();
-  if (!api.addProjectMarker2 || !api.updateArrange) {
+  if (!api.updateArrange) {
     SpikeLog("[holoroll] cannot place items: REAPER API incomplete.\n");
     return;
   }
-  // Wipe our existing regions to avoid duplicates on re-run. Items are left
-  // in place by design — user-created content is never auto-deleted.
-  // De-dup logic below ensures we don't ADD duplicate items either.
+  // Wipe any legacy HoloRoll regions left over from < alpha.10 projects.
+  // No new regions get created from this point on, so on a fresh project
+  // this is a no-op.
   DeleteOurRegions();
 
   // Snapshot existing item names BEFORE creating the new track. We don't
@@ -1573,14 +1592,6 @@ void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
     return false;
   };
 
-  // Read placement options from viewport. Variations and regionOverhang
-  // are placement-time values; pre/post-roll are read but unused here
-  // (they only affect playback resolution, not item/region geometry).
-  int variations = 1;
-  float preRoll_unused = 1.0f, postRoll_unused = 1.0f, regionOverhang = 0.5f;
-  g_viewport.GetPlacementOptions(&variations, &preRoll_unused,
-                                 &postRoll_unused, &regionOverhang);
-
   // v0.12.0-alpha.6: items, JSFX and envelopes all live on the same
   // persistent "HoloRoll" track now. Find-or-create + add JSFX in one go.
   MotionFxLocation loc = EnsureItemsTrackAndFx();
@@ -1592,12 +1603,10 @@ void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
 
   const double fps = GetFps();
   const double gap = GetGap();
-  const std::string& prefix = AnimationLibrary::RegionNamePrefix();
-  const int color = AnimationLibrary::RegionColorReaper();
 
-  // Start after the last existing region (regardless of who created it),
-  // so we never overlap. If no regions exist, start from 0 + gap.
-  const double lastEnd = FindLastRegionEnd();
+  // Start after the last placed HoloRoll item, so re-running Place all
+  // appends new content past existing items instead of overlapping.
+  const double lastEnd = FindLastHoloRollItemEnd();
   double cursor = (lastEnd > 0.0) ? (lastEnd + gap) : 0.0;
 
   std::size_t placed = 0;
@@ -1608,51 +1617,41 @@ void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
     const double duration = anim.DurationSeconds(fps);
     if (duration <= 0.0) continue;
 
-    for (int v = 1; v <= variations; ++v) {
-      const std::string itemName = MakeVariationName(anim.basename, v);
-      if (alreadyPlaced(itemName)) {
-        ++skipped;
-        continue;
+    // alpha.10: variations setting removed — one item per animation.
+    const std::string& itemName = anim.basename;
+    if (alreadyPlaced(itemName)) {
+      ++skipped;
+      continue;
+    }
+    MediaItem* item = CreateNamedItemWithRolls(targetTrack, cursor, duration,
+                                               0.0f, 0.0f, itemName);
+    if (item) {
+      // v0.12.0-alpha.5/.6: write motion envelopes for this item.
+      // Surgical clear in [item.start, item.end] keeps envelopes for
+      // previously-placed items intact (track is persistent).
+      if (loc.fxIdx >= 0) {
+        WriteMotionEnvelopesForItem(targetTrack, loc.fxIdx,
+                                    anim, cursor, fps);
       }
-      MediaItem* item = CreateNamedItemWithRolls(targetTrack, cursor, duration,
-                                                 0.0f, 0.0f, itemName);
-      if (item) {
-        const std::string regionName = prefix + itemName;
-        // Region: from item.start to item.end + overhang. No pre-roll
-        // affects the region; the visual buffer is rendered overlay-side.
-        api.addProjectMarker2(nullptr, true, cursor,
-                              cursor + duration + regionOverhang,
-                              regionName.c_str(), -1, color);
-        // v0.12.0-alpha.5/.6: write motion envelopes for this item.
-        // Surgical clear in [item.start, item.end] keeps envelopes for
-        // previously-placed items intact (track is persistent).
-        if (loc.fxIdx >= 0) {
-          WriteMotionEnvelopesForItem(targetTrack, loc.fxIdx,
-                                      anim, cursor, fps);
-        }
-        ++placed;
-        // Add to existing-names so later variations of the same anim
-        // (within this Place all run) also de-dup correctly.
-        existingNames.push_back(itemName);
-        cursor += duration + gap;
-      }
+      ++placed;
+      existingNames.push_back(itemName);
+      cursor += duration + gap;
     }
   }
 
   api.updateArrange();
   ConsoleLog("[holoroll] placed " + std::to_string(placed) +
-             " items+regions (skipped " + std::to_string(skipped) + " already-placed).\n");
+             " item(s) (skipped " + std::to_string(skipped) + " already-placed).\n");
 }
 
-// Place pending hot-reload animations after the last existing region.
-// v0.11.1: respects placement options (variations, region overhang) and
-// de-dups against existing items. Pre/post-roll are global playback
-// buffers, not part of item geometry.
+// v0.12.0-alpha.10: place items for animations newly detected by the
+// folder watcher. Auto-called from ProcessWatcherEvents (no modal anymore).
+// De-dups against existing items. No regions, no variations.
 void PlacePendingAtCursor() {
   if (g_pendingNewAnimations.empty()) return;
   const auto& api = g_bridge.Api();
 
-  // Snapshot existing item names BEFORE creating the new track.
+  // Snapshot existing item names so we don't duplicate.
   std::vector<std::string> existingNames;
   {
     const auto items = EnumProjectItems();
@@ -1666,11 +1665,6 @@ void PlacePendingAtCursor() {
     return false;
   };
 
-  int variations = 1;
-  float preRoll_unused = 1.0f, postRoll_unused = 1.0f, regionOverhang = 0.5f;
-  g_viewport.GetPlacementOptions(&variations, &preRoll_unused,
-                                 &postRoll_unused, &regionOverhang);
-
   // v0.12.0-alpha.6: items + JSFX on the same persistent "HoloRoll" track.
   MotionFxLocation loc = EnsureItemsTrackAndFx();
   MediaTrack* track = loc.track;
@@ -1682,11 +1676,8 @@ void PlacePendingAtCursor() {
 
   const double fps = GetFps();
   const double gap = GetGap();
-  const std::string& prefix = AnimationLibrary::RegionNamePrefix();
-  const int color = AnimationLibrary::RegionColorReaper();
 
-  // Start after the last existing region. If none, start at 0.
-  const double lastEnd = FindLastRegionEnd();
+  const double lastEnd = FindLastHoloRollItemEnd();
   double pos = (lastEnd > 0.0) ? (lastEnd + gap) : 0.0;
 
   std::size_t placed = 0;
@@ -1699,30 +1690,19 @@ void PlacePendingAtCursor() {
     const double duration = anim.DurationSeconds(fps);
     if (duration <= 0.0) continue;
 
-    for (int v = 1; v <= variations; ++v) {
-      const std::string itemName = MakeVariationName(basename, v);
-      if (alreadyPlaced(itemName)) {
-        ++skipped;
-        continue;
+    if (alreadyPlaced(basename)) {
+      ++skipped;
+      continue;
+    }
+    MediaItem* item = CreateNamedItemWithRolls(track, pos, duration,
+                                               0.0f, 0.0f, basename);
+    if (item) {
+      if (loc.fxIdx >= 0) {
+        WriteMotionEnvelopesForItem(track, loc.fxIdx, anim, pos, fps);
       }
-      MediaItem* item = CreateNamedItemWithRolls(track, pos, duration,
-                                                 0.0f, 0.0f, itemName);
-      if (item) {
-        if (api.addProjectMarker2) {
-          const std::string regionName = prefix + itemName;
-          api.addProjectMarker2(nullptr, true, pos,
-                                pos + duration + regionOverhang,
-                                regionName.c_str(), -1, color);
-        }
-        // v0.12.0-alpha.5/.6: surgical motion envelope write.
-        if (loc.fxIdx >= 0) {
-          WriteMotionEnvelopesForItem(track, loc.fxIdx,
-                                      anim, pos, fps);
-        }
-        ++placed;
-        existingNames.push_back(itemName);
-        pos += duration + gap;
-      }
+      ++placed;
+      existingNames.push_back(basename);
+      pos += duration + gap;
     }
   }
 
@@ -1732,17 +1712,10 @@ void PlacePendingAtCursor() {
   g_pendingNewAnimations.clear();
 }
 
-// Convenience: create one item for a single named animation. v0.11.1:
-// respects region overhang. Variations is NOT applied here (this is the
-// "+ Place" button path which always creates one). Pre/post-roll are
-// global playback buffers, not part of item/region geometry.
+// v0.12.0-alpha.10: create one item for a single named animation
+// ("+ Place" button next to a library row). No region, no variation.
 void PlaceSingleAtCursor(const std::string& basename) {
   const auto& api = g_bridge.Api();
-
-  int variations_unused = 1;
-  float preRoll_unused = 1.0f, postRoll_unused = 1.0f, regionOverhang = 0.5f;
-  g_viewport.GetPlacementOptions(&variations_unused, &preRoll_unused,
-                                 &postRoll_unused, &regionOverhang);
 
   // v0.12.0-alpha.6: items + JSFX on the same persistent "HoloRoll" track.
   MotionFxLocation loc = EnsureItemsTrackAndFx();
@@ -1755,25 +1728,142 @@ void PlaceSingleAtCursor(const std::string& basename) {
   const double duration = anim.DurationSeconds(GetFps());
   if (duration <= 0.0) return;
 
-  const double lastEnd = FindLastRegionEnd();
+  const double lastEnd = FindLastHoloRollItemEnd();
   const double pos = (lastEnd > 0.0) ? (lastEnd + GetGap()) : 0.0;
 
   MediaItem* item = CreateNamedItemWithRolls(track, pos, duration,
                                              0.0f, 0.0f, basename);
-  if (item && api.addProjectMarker2) {
-    const std::string& prefix = AnimationLibrary::RegionNamePrefix();
-    const int color = AnimationLibrary::RegionColorReaper();
-    const std::string regionName = prefix + basename;
-    api.addProjectMarker2(nullptr, true, pos,
-                          pos + duration + regionOverhang,
-                          regionName.c_str(), -1, color);
-  }
-  // v0.12.0-alpha.5/.6: motion envelopes for this single item.
   if (item && loc.fxIdx >= 0) {
-    WriteMotionEnvelopesForItem(track, loc.fxIdx,
-                                anim, pos, GetFps());
+    WriteMotionEnvelopesForItem(track, loc.fxIdx, anim, pos, GetFps());
   }
   if (api.updateArrange) api.updateArrange();
+}
+
+// ---- v0.12.0-alpha.9 motion-event marker generation -----------------------
+//
+// Walk every placed HoloRoll item, run the active motion-event detector on
+// the item's top-1 active world-motion bone, and write REAPER project
+// markers at the detected event times.
+//
+// Marker naming: "<itemname>:<eventtype>", e.g. "door_open:start",
+// "door_open:peak_hi", "door_open:zero_cross". The "<itemname>:" prefix is
+// what we use as the surgical-clear key — re-running the action wipes
+// previous HoloRoll markers in each item's range and rewrites them
+// without disturbing user-created markers anywhere else on the timeline.
+//
+// Uses project markers (isrgn=false), not regions — regions are reserved
+// for the placement workflow and have a different visual lane in REAPER.
+
+// Helper: delete project markers whose name starts with `namePrefix` and
+// whose time falls inside [startSec, endSec]. We delete in two phases
+// (collect indices first, then call DeleteProjectMarker) so we don't
+// invalidate the marker enumeration mid-walk.
+void DeleteHoloRollMarkersInRange(double startSec, double endSec,
+                                  const std::string& namePrefix) {
+  const auto& api = g_bridge.Api();
+  if (!api.enumProjectMarkers3 || !api.deleteProjectMarker) return;
+
+  std::vector<int> toDelete;
+  int idx = 0;
+  while (true) {
+    bool isrgn = false;
+    double pos = 0.0, rgnend = 0.0;
+    const char* name = nullptr;
+    int markrgnindexnumber = 0;
+    int color = 0;
+    const int next = api.enumProjectMarkers3(nullptr, idx, &isrgn, &pos, &rgnend,
+                                             &name, &markrgnindexnumber, &color);
+    if (next == 0) break;
+    if (!isrgn && pos >= startSec && pos <= endSec) {
+      const std::string nm = name ? name : "";
+      if (nm.rfind(namePrefix, 0) == 0) {
+        toDelete.push_back(markrgnindexnumber);
+      }
+    }
+    idx = next;
+  }
+  // Third arg to DeleteProjectMarker: the marker/region index to remove.
+  // Note: marker indices are stable IDs assigned by REAPER, not loop
+  // positions, so deleting them in any order is safe.
+  for (const int id : toDelete) {
+    api.deleteProjectMarker(nullptr, id, false);  // false = marker, not region
+  }
+}
+
+void GenerateAllMotionMarkers() {
+  const auto& api = g_bridge.Api();
+  if (!api.addProjectMarker2 || !api.enumProjectMarkers3 ||
+      !api.deleteProjectMarker) {
+    SpikeLog("[holoroll] Generate motion markers: required REAPER APIs missing.\n");
+    return;
+  }
+
+  const auto items = EnumProjectItems();
+  if (items.empty()) {
+    ConsoleLog("[holoroll] Generate motion markers: no HoloRoll items placed yet.\n");
+    return;
+  }
+
+  // For now: hardcoded default detector. alpha.10 will add a UI dropdown
+  // to pick from AllMotionEventDetectorNames().
+  const IMotionEventDetector* detector = DefaultMotionEventDetector();
+  if (!detector) {
+    SpikeLog("[holoroll] Generate motion markers: no detectors registered.\n");
+    return;
+  }
+
+  const double fps = GetFps();
+  const int markerColor = AnimationLibrary::RegionColorReaper();
+
+  std::size_t totalEvents = 0;
+  std::size_t itemsProcessed = 0;
+  std::size_t itemsSkipped = 0;
+
+  for (const DiscoveredItem& di : items) {
+    const std::size_t animIdx = g_lib.ResolveAnimationByItemName(di.name);
+    if (animIdx == std::numeric_limits<std::size_t>::max()) {
+      ++itemsSkipped;
+      continue;
+    }
+    const LoadedAnimation& anim = g_lib.At(animIdx);
+    if (anim.worldMotion.empty()) {
+      ++itemsSkipped;
+      continue;
+    }
+
+    // Top-1 active bone: same selection metric as envelope writing
+    // uses for slider 1, so markers and envelope share the same
+    // "primary bone" view. (Multi-bone marker generation is alpha.10.)
+    const auto topBones = TopNActiveBones(anim.worldMotion, 1);
+    if (topBones.empty()) {
+      ++itemsSkipped;
+      continue;
+    }
+    const std::vector<float>& motion = anim.worldMotion[topBones[0]];
+
+    // Surgical clear: scrub previous HoloRoll markers for THIS item only.
+    const std::string namePrefix = di.name + ":";
+    DeleteHoloRollMarkersInRange(di.startSeconds, di.endSeconds, namePrefix);
+
+    // Run detector and write markers.
+    const auto events = detector->Detect(motion, di.startSeconds, fps);
+    for (const MotionEvent& ev : events) {
+      const std::string markerName = di.name + ":" + ev.eventType;
+      // For a marker, REAPER's AddProjectMarker2 ignores rgnend; pass 0.
+      api.addProjectMarker2(nullptr, /*isrgn=*/false,
+                            ev.timeSec, 0.0,
+                            markerName.c_str(), -1, markerColor);
+    }
+
+    totalEvents += events.size();
+    ++itemsProcessed;
+  }
+
+  if (api.updateArrange) api.updateArrange();
+  ConsoleLog("[holoroll] Generated " + std::to_string(totalEvents) +
+             " motion marker(s) across " + std::to_string(itemsProcessed) +
+             " item(s) using detector '" + detector->Name() +
+             "' (skipped " + std::to_string(itemsSkipped) + " item(s) without resolvable animation).\n");
 }
 
 // ---- v0.6.0 spike: create an empty named item on a track ------------------
@@ -1957,7 +2047,12 @@ void ProcessWatcherEvents() {
   if (!newBasenames.empty()) {
     g_pendingNewAnimations = std::move(newBasenames);
     ConsoleLog("[holoroll] hot-reload: " + std::to_string(g_pendingNewAnimations.size()) +
-               " new animation(s) detected.\n");
+               " new animation(s) detected; auto-placing.\n");
+    // v0.12.0-alpha.10: auto-place instead of waiting for a modal. The
+    // confirm/skip popup added in v0.4.0 is gone — placement was always
+    // the desired action in practice. PlacePendingAtCursor consumes
+    // g_pendingNewAnimations and clears the queue itself.
+    PlacePendingAtCursor();
   } else {
     ConsoleLog("[holoroll] hot-reload: rescan found no new animations.\n");
   }
@@ -2053,10 +2148,8 @@ void OnTimer() {
   // the resolver expands the match window by these values so the playhead
   // visually "holds" frame 0 / last frame in the buffer zones around items.
   const std::vector<DiscoveredItem> items = EnumProjectItems();
-  int variations_unused = 1;
-  float globalPreRoll = 1.0f, globalPostRoll = 1.0f, regionOverhang_unused = 0.5f;
-  g_viewport.GetPlacementOptions(&variations_unused, &globalPreRoll,
-                                 &globalPostRoll, &regionOverhang_unused);
+  float globalPreRoll = 1.0f, globalPostRoll = 1.0f;
+  g_viewport.GetPlacementOptions(&globalPreRoll, &globalPostRoll);
   const ItemResolveResult itemResult = ResolvePlayheadFromItems(
       timelineTime, GetFps(), items, globalPreRoll, globalPostRoll);
 
@@ -2164,15 +2257,12 @@ void OnTimer() {
   if (req.spikeTestCreateItem) SpikeTestCreateItem();
   if (req.resetFolderOverride) ResetFolderToProjectDefault();
 
-  // Handle the new-animations modal response.
-  if (req.newAnimationsChoice == 1) {
-    PlacePendingAtCursor();
-  } else if (req.newAnimationsChoice == 2) {
-    ConsoleLog("[holoroll] hot-reload: user dismissed " +
-               std::to_string(g_pendingNewAnimations.size()) +
-               " pending animation(s).\n");
-    g_pendingNewAnimations.clear();
-  }
+  // v0.12.0-alpha.9: motion event marker generation.
+  if (req.generateMotionMarkers) GenerateAllMotionMarkers();
+
+  // v0.12.0-alpha.10: new-animations modal dispatch removed. Placement is
+  // now automatic — ProcessWatcherEvents calls PlacePendingAtCursor
+  // directly when new files are detected, no user confirmation step.
 }
 
 bool RegisterAction(reaper_plugin_info_t* rec,

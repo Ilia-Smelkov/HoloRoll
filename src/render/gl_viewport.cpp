@@ -929,21 +929,33 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     if (ImGui::Button("Reload folder")) pendingRequests_.reloadFolder = true;
     ImGui::SameLine();
     if (ImGui::Button("Place all")) pendingRequests_.placeRegions = true;
-
-    // v0.11.0: placement options. Inline so they're visible right next to
-    // the Place all button — the value is what "Place all" will use.
-    // The dirty flag fires once any of these fires; entry.cpp picks that
-    // up via ConsumePlacementDirty and writes to holoroll_config.ini.
-    ImGui::PushItemWidth(80.0f);
-    if (ImGui::InputInt("Variations", &placementVariations_)) {
-      placementVariations_ = std::max(1, std::min(20, placementVariations_));
-      placementDirty_ = true;
+    ImGui::SameLine();
+    // v0.12.0-alpha.9: walk all placed items and write project markers at
+    // detected motion events (start / peak_hi / peak_lo / zero_cross /
+    // end) on each item's top-1 active bone. Algorithm is the
+    // RigidMechanismDetector — tuned for doors / levers / drawers /
+    // switches; future detectors (footstep, impact) plug into the same
+    // registry and pick will become a dropdown.
+    if (ImGui::Button("Generate motion markers")) {
+      pendingRequests_.generateMotionMarkers = true;
     }
     if (ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("How many copies of each animation to place. >1 creates _2, _3 ... "
-                        "variation suffixes — same animation, separate items so you can\n"
-                        "layer different sounds.");
+      ImGui::SetTooltip(
+          "For every placed HoloRoll item, detect motion events on its top-1\n"
+          "active bone and place REAPER project markers at:\n"
+          "  - motion start / end (hysteresis-gated activity boundary)\n"
+          "  - high / low peaks (local extrema of signed motion)\n"
+          "  - zero crossings (passes through trajectory mean)\n"
+          "Re-running cleans previous HoloRoll markers in each item's\n"
+          "time range and rewrites them. Tuned for rigid mechanical\n"
+          "animations; future detectors will handle footsteps etc.");
     }
+
+    // v0.11.0 / alpha.10: placement options. Inline next to "Place all".
+    // alpha.10 removed Variations (one item per animation) and Region
+    // overhang (no regions auto-created anymore). Pre/post-roll stay —
+    // they're playback-time hold buffers, not item geometry.
+    ImGui::PushItemWidth(80.0f);
     if (ImGui::InputFloat("Pre-roll (s)", &placementPreRollSec_, 0.0f, 0.0f, "%.2f")) {
       placementPreRollSec_ = std::max(0.0f, std::min(10.0f, placementPreRollSec_));
       placementDirty_ = true;
@@ -959,14 +971,6 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     if (ImGui::IsItemHovered()) {
       ImGui::SetTooltip("Hold-frame buffer AFTER the animation. Last frame is shown during\n"
                         "this section so reverbs/tails have room.");
-    }
-    if (ImGui::InputFloat("Region overhang (s)", &placementRegionOverhang_, 0.0f, 0.0f, "%.2f")) {
-      placementRegionOverhang_ = std::max(0.0f, std::min(10.0f, placementRegionOverhang_));
-      placementDirty_ = true;
-    }
-    if (ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("Region extends this many seconds past the end of the item.\n"
-                        "Visual handle for grouping; doesn't affect playback.");
     }
     ImGui::PopItemWidth();
 
@@ -1068,16 +1072,12 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   ImGui::TextDisabled("RMB + WASD/QE = fly | wheel = speed | LMB-drag arcs = rotate");
   ImGui::End();
 
-  // "New animations detected" modal. Shown when the folder watcher reports
-  // additions (entry.cpp populates status.pendingNewAnimations). The user's
-  // response is folded into pendingRequests_.newAnimationsChoice so
-  // entry.cpp can act on it after ConsumeRequests() returns.
-  if (!status.pendingNewAnimations.empty()) {
-    const int choice = DrawNewAnimationsModal(status.pendingNewAnimations);
-    if (choice != 0) {
-      pendingRequests_.newAnimationsChoice = choice;
-    }
-  }
+  // v0.12.0-alpha.10: "New animations detected" modal removed.
+  // Placement is now automatic — see ProcessWatcherEvents in entry.cpp.
+  // status.pendingNewAnimations is normally empty by the time the UI
+  // runs (PlacePendingAtCursor clears the queue synchronously). The
+  // DrawNewAnimationsModal helper below is kept temporarily as dead
+  // code; safe to delete in a follow-up cleanup.
 
   // Drop-zone visual feedback. Drawn last so it goes on top of the
   // overlay, the modal, and the 3D scene. Cheap when no drag is active
@@ -1701,18 +1701,14 @@ bool GlViewport::ConsumeSceneDirty() {
 
 // ---- v0.11.0 placement options API -----------------------------------------
 
-void GlViewport::SetPlacementOptions(int variations, float preRollSec, float postRollSec, float regionOverhangSec) {
-  placementVariations_ = std::max(1, std::min(20, variations));
+void GlViewport::SetPlacementOptions(float preRollSec, float postRollSec) {
   placementPreRollSec_ = std::max(0.0f, std::min(10.0f, preRollSec));
   placementPostRollSec_ = std::max(0.0f, std::min(10.0f, postRollSec));
-  placementRegionOverhang_ = std::max(0.0f, std::min(10.0f, regionOverhangSec));
 }
 
-void GlViewport::GetPlacementOptions(int* variations, float* preRollSec, float* postRollSec, float* regionOverhangSec) const {
-  if (variations) *variations = placementVariations_;
+void GlViewport::GetPlacementOptions(float* preRollSec, float* postRollSec) const {
   if (preRollSec) *preRollSec = placementPreRollSec_;
   if (postRollSec) *postRollSec = placementPostRollSec_;
-  if (regionOverhangSec) *regionOverhangSec = placementRegionOverhang_;
 }
 
 bool GlViewport::ConsumePlacementDirty() {
