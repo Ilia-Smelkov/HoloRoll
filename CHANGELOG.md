@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.11] — 2026-05-08
+
+WAAPI-style TCP socket bridge for external command senders. Inspired
+by Wwise's WAAPI / Reaper Web Interface — a Python (or any) app can
+now connect locally, send a JSON command, get back a JSON reply, and
+control HoloRoll/REAPER from outside.
+
+### Added
+- **TCP socket bridge** on `127.0.0.1:58271` (override via
+  `REAPERBRIDGE_PORT` env var). Line-delimited JSON:
+  - request:  `{"method":"<verb>","args":{...}}\n`
+  - reply OK: `{"ok":true,"result":{...}}\n`
+  - reply err:`{"ok":false,"error":"..."}\n`
+  - One connection = one command. Client sends, reads, closes.
+- **Threading model:** worker thread runs the accept loop; per-
+  connection threads parse and queue requests; a `Tick()` call on
+  REAPER's main thread (wired into `OnTimer`) drains the queue and
+  runs handlers — every REAPER C API call happens on the main
+  thread, as REAPER requires.
+- **Six implemented verbs:**
+  - `ping` → `{}` — liveness check.
+  - `get_selection` → `{items: [{name, position, length}, ...]}` for
+    every selected media item; MIDI takes skipped.
+  - `get_regions` → `{regions: [{name, start, end, index}, ...]}`
+    from `EnumProjectMarkers3` with `isrgn=true`.
+  - `clear_regions` → deletes all regions, returns `{deleted: N}`.
+  - `create_regions` (args: `{regions: [{name,start,end},...],
+    reposition: [{index,position},...]}`) → under
+    `Undo_BeginBlock`/`PreventUIRefresh(1)`: reposition selected
+    items by index, create regions; returns `{created: N}`.
+  - `run_script` (args: `{path: "<absolute .lua>"}`) →
+    `AddRemoveReaScript(true, 0, path, true)` then `Main_OnCommand`.
+    Returns `{ran: true}` or an error.
+
+### Internal
+- New `src/extension/socket_server.{h,cpp}`. Public surface:
+  `socket_server::Start()` / `Stop()` / `Tick()`.
+- New REAPER API bindings: `GetSelectedMediaItem`,
+  `CountSelectedMediaItems`, `GetTakeName`, `TakeIsMIDI`,
+  `Undo_BeginBlock`, `Undo_EndBlock`, `PreventUIRefresh`,
+  `AddRemoveReaScript`.
+- CMake: new source compiled, link `ws2_32` for Winsock.
+- JSON via `nlohmann/json` (already on the include path through
+  tinygltf's bundled `json.hpp`); no extra FetchContent needed.
+
+### Design rationale
+- HoloRoll does NOT manage a user-script library; the script-loader
+  app on the other side of the socket tells HoloRoll which `.lua`
+  to run. Keeps this extension a pure transport layer.
+- Loopback-only bind (`INADDR_LOOPBACK`) — no remote access.
+- 30-second per-connection timeout: misbehaving clients can't park
+  a worker thread forever.
+- `SO_REUSEADDR` set on the listener so plugin reloads can rebind
+  immediately instead of waiting for TIME_WAIT.
+- `Tick()` runs in `OnTimer` regardless of viewport state — the
+  bridge is decoupled from the UI lifecycle.
+
+### Known limitations
+- Per-connection threads are spawned, not pooled. For the expected
+  workload (occasional external commands), this is fine. If a real
+  high-throughput case emerges, a small thread pool with bounded
+  queue would be the next step.
+- No authentication. Loopback-only mitigates remote attack; local
+  users on the same machine have full access to the bridge. Same
+  trust boundary as Reaper's own Web Interface.
+
+
 ## [0.12.0-alpha.10] — 2026-05-08
 
 Placement workflow simplification. Three friction points dropped:
@@ -1287,7 +1354,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.10...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.11...HEAD
+[0.12.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.11
 [0.12.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.10
 [0.12.0-alpha.9]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.9
 [0.12.0-alpha.8]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.8

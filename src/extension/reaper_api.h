@@ -141,6 +141,21 @@ using GetEnvelopeStateChunkFn = bool (*)(TrackEnvelope* env, char* strNeedBig,
 using SetEnvelopeStateChunkFn = bool (*)(TrackEnvelope* env, const char* str,
                                          bool isundoOptional);
 
+// ---- v0.12.0-alpha.11 socket-bridge APIs --------------------------------
+//
+// Backing functions for the WAAPI-style TCP socket bridge that lets
+// external apps query and modify the project from outside REAPER.
+// See src/extension/socket_server.cpp for the verb handlers.
+using GetSelectedMediaItemFn   = MediaItem* (*)(ReaProject* proj, int selitem);
+using CountSelectedMediaItemsFn = int (*)(ReaProject* proj);
+using GetTakeNameFn            = const char* (*)(MediaItem_Take* take);
+using TakeIsMIDIFn             = bool (*)(MediaItem_Take* take);
+using Undo_BeginBlockFn        = void (*)();
+using Undo_EndBlockFn          = void (*)(const char* descchange, int extraflags);
+using PreventUIRefreshFn       = void (*)(int prevent_count);
+using AddRemoveReaScriptFn     = int (*)(bool isAdd, int sectionID,
+                                         const char* scriptfn, bool commit);
+
 struct ReaperApi {
   GetPlayPositionFn getPlayPosition = nullptr;
   GetPlayStateFn getPlayState = nullptr;
@@ -200,6 +215,16 @@ struct ReaperApi {
   // v0.12.0-alpha.7: envelope visibility flag via state chunk.
   GetEnvelopeStateChunkFn getEnvelopeStateChunk = nullptr;
   SetEnvelopeStateChunkFn setEnvelopeStateChunk = nullptr;
+
+  // v0.12.0-alpha.11: socket bridge (selection, undo, scripts).
+  GetSelectedMediaItemFn   getSelectedMediaItem = nullptr;
+  CountSelectedMediaItemsFn countSelectedMediaItems = nullptr;
+  GetTakeNameFn            getTakeName = nullptr;
+  TakeIsMIDIFn             takeIsMIDI = nullptr;
+  Undo_BeginBlockFn        undo_BeginBlock = nullptr;
+  Undo_EndBlockFn          undo_EndBlock = nullptr;
+  PreventUIRefreshFn       preventUIRefresh = nullptr;
+  AddRemoveReaScriptFn     addRemoveReaScript = nullptr;
 };
 
 bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api);

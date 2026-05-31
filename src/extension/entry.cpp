@@ -11,6 +11,7 @@
 
 #include "core/animation_library.h"
 #include "core/motion_events.h"
+#include "extension/socket_server.h"
 #include "core/config_store.h"
 #include "core/folder_watcher.h"
 #include "core/viewport_poses.h"
@@ -2113,6 +2114,12 @@ void OnTimer() {
   g_bridge.OnTimerTick();
   g_viewport.Tick();
 
+  // v0.12.0-alpha.11: pump the socket bridge regardless of viewport
+  // visibility. External commands should work even when the user has
+  // collapsed / closed the HoloRoll panel — the bridge isn't tied to
+  // the UI lifecycle.
+  socket_server::Tick();
+
   if (!g_viewport.IsOpen()) return;
 
   // v0.7.0: detect REAPER project changes (open / save-as / switch / close).
@@ -2280,6 +2287,25 @@ bool RegisterAction(reaper_plugin_info_t* rec,
 }
 }  // namespace
 
+// ---- v0.12.0-alpha.11 socket-bridge linkage shims -------------------------
+//
+// The socket bridge lives in src/extension/socket_server.cpp (separate
+// translation unit). It needs access to two things owned by entry.cpp:
+//   - the REAPER API table (ReaperBridge::Api())
+//   - the ConsoleLog helper for status messages
+// Both are defined inside this file's anonymous namespace above, which
+// gives them internal linkage and makes them invisible to other TUs.
+// These two file-scope wrappers have external linkage and forward to the
+// internal symbols. Anonymous-namespace members are accessible from the
+// enclosing global namespace without qualification, so the body just
+// calls them by name.
+const ReaperApi& holoroll_bridge_api() {
+  return g_bridge.Api();
+}
+void holoroll_bridge_log(const std::string& msg) {
+  ConsoleLog(msg);
+}
+
 extern "C" {
 REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hInstance, reaper_plugin_info_t* rec) {
   g_dllHandle = reinterpret_cast<HMODULE>(hInstance);
@@ -2294,6 +2320,9 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
       if (g_reloadConfigCommandId) g_rec->Register("-gaccel", &g_reloadConfigAction);
       g_rec->Register("-timer", reinterpret_cast<void*>(OnTimer));
     }
+    // v0.12.0-alpha.11: stop the socket bridge before any other cleanup
+    // so worker thread can't queue new requests against teardowned state.
+    socket_server::Stop();
     CloseViewportIfNeeded();
     g_watcher.Stop();
     g_incomingWatcher.Stop();
@@ -2394,6 +2423,14 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
   }
 
   rec->Register("timer", reinterpret_cast<void*>(OnTimer));
+
+  // v0.12.0-alpha.11: TCP socket bridge for external command senders.
+  // Worker thread + accept loop run independently; OnTimer below
+  // drains the request queue on the main thread (REAPER C API rule).
+  // Failure to start (port busy, etc.) is non-fatal — logged and
+  // continues without the bridge.
+  socket_server::Start();
+
   return 1;
 }
 }

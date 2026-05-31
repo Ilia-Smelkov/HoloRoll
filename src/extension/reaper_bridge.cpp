@@ -69,6 +69,16 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.getEnvelopeStateChunk = reinterpret_cast<GetEnvelopeStateChunkFn>(rec->GetFunc("GetEnvelopeStateChunk"));
   api.setEnvelopeStateChunk = reinterpret_cast<SetEnvelopeStateChunkFn>(rec->GetFunc("SetEnvelopeStateChunk"));
 
+  // v0.12.0-alpha.11: socket bridge — selection, undo, script execution.
+  api.getSelectedMediaItem    = reinterpret_cast<GetSelectedMediaItemFn>(rec->GetFunc("GetSelectedMediaItem"));
+  api.countSelectedMediaItems = reinterpret_cast<CountSelectedMediaItemsFn>(rec->GetFunc("CountSelectedMediaItems"));
+  api.getTakeName             = reinterpret_cast<GetTakeNameFn>(rec->GetFunc("GetTakeName"));
+  api.takeIsMIDI              = reinterpret_cast<TakeIsMIDIFn>(rec->GetFunc("TakeIsMIDI"));
+  api.undo_BeginBlock         = reinterpret_cast<Undo_BeginBlockFn>(rec->GetFunc("Undo_BeginBlock"));
+  api.undo_EndBlock           = reinterpret_cast<Undo_EndBlockFn>(rec->GetFunc("Undo_EndBlock"));
+  api.preventUIRefresh        = reinterpret_cast<PreventUIRefreshFn>(rec->GetFunc("PreventUIRefresh"));
+  api.addRemoveReaScript      = reinterpret_cast<AddRemoveReaScriptFn>(rec->GetFunc("AddRemoveReaScript"));
+
   return api.getPlayPosition && api.mainOnCommand;
 }
 

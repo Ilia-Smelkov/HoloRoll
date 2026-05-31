@@ -110,6 +110,17 @@ without writing a line of automation by hand.
   re-run. Pattern follows Unreal's Animation Modifiers (offline asset
   bake), inspired by Epic's `FootstepAnimEventsModifier` and
   community `FootSyncMarkers` modifier.
+- **alpha.10** (2026-05-08): placement simplification — auto-region
+  creation removed, variations count removed, "new animations
+  detected" modal removed (placement is now automatic on watcher
+  events). One item per animation, no decoration regions.
+- **alpha.11** (2026-05-08): WAAPI-style TCP socket bridge for
+  external command senders (`127.0.0.1:58271`, line-delimited JSON).
+  Six verbs: `ping`, `get_selection`, `get_regions`, `clear_regions`,
+  `create_regions`, `run_script`. Worker thread + main-thread
+  `Tick()` to keep REAPER C API calls on the main thread. New
+  helpers in `src/extension/socket_server.{h,cpp}` — independent of
+  the rest of HoloRoll's domain logic (transport layer only).
 
 ### Pending for v0.12.0 final
 

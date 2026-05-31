@@ -42,6 +42,7 @@ add_library(reaper_holoroll SHARED
   src/extension/reaper_bridge.cpp
   src/extension/folder_picker.cpp
   src/extension/drop_target.cpp
+  src/extension/socket_server.cpp
   src/core/mdd_data_manager.cpp
   src/core/obj_index_loader.cpp
   src/core/animation_library.cpp
@@ -84,6 +85,8 @@ target_link_libraries(reaper_holoroll PRIVATE
   shell32
   ole32
   oleaut32
+  # v0.12.0-alpha.11: TCP socket bridge.
+  ws2_32
 )
 
 if(MSVC)
