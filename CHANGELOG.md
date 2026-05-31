@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.12] — 2026-05-08
+
+Installer policy tweak: stop force-killing REAPER in silent mode.
+
+### Changed
+- **Headless installer no longer touches REAPER.** Through alpha.11
+  the silent path of `holoroll.iss` ran `taskkill /F /IM reaper.exe`
+  automatically when REAPER was open — convenient for unattended
+  bootstrap scripts but destructive (force-kill drops unsaved work
+  with no warning). alpha.12 splits the policy:
+  - **Silent / very-silent mode** (`/SILENT`, `/VERYSILENT`): do
+    nothing. Files copy as-is. The caller is assumed to be either
+    (a) a first-install bootstrapper running on a clean machine
+    where REAPER hasn't been opened yet, or (b) an in-app
+    auto-updater (planned) that handles the locked-DLL problem on
+    its own. If REAPER happens to be running and files are locked,
+    Inno's standard "file in use" handling fires and setup may
+    return a non-zero exit code.
+  - **UI mode** (interactive double-click): unchanged. Still prompts
+    "Close REAPER?" and offers to taskkill on confirmation.
+
+### Migration
+- Scripts that called `HoloRoll-Setup-x.y.z.exe /VERYSILENT` while
+  REAPER was running need updating: either close REAPER before
+  invoking the installer (cleanest), or accept that the install may
+  partially fail when files are locked. Exit code 3 no longer fires
+  in silent mode — callers should rely on file-not-replaced
+  detection (verify DLL version post-install) if they need to be
+  sure.
+
+### Rationale
+- The destructive default mismatched the actual use case. The
+  bridge / auto-py / future auto-updater flows all already have a
+  "close REAPER" prompt in the calling app — letting the installer
+  ALSO kill REAPER doubled the surface area for "user lost work"
+  bugs without buying anything.
+
+
 ## [0.12.0-alpha.11] — 2026-05-08
 
 WAAPI-style TCP socket bridge for external command senders. Inspired
@@ -1354,7 +1392,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.11...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.12...HEAD
+[0.12.0-alpha.12]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.12
 [0.12.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.11
 [0.12.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.10
 [0.12.0-alpha.9]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.9

@@ -8,11 +8,21 @@
 ;   HoloRoll-Setup-x.y.z.exe /VERYSILENT /SUPPRESSMSGBOXES /LOG="install.log"
 ;   HoloRoll-Setup-x.y.z.exe /SILENT /DIR="D:\REAPER\UserPlugins"
 ;
+; Headless behaviour (alpha.12+): the installer does NOT touch REAPER in
+; silent mode. The caller (a first-time bootstrapper, or an in-app
+; auto-updater) is expected to make sure REAPER is closed or that locked
+; files won't be a problem. If a file is in use, Inno's standard
+; "file in use" handling fires and the install may fail with a non-zero
+; exit code. UI mode (interactive double-click) still prompts the user
+; about REAPER and offers to close it, unchanged.
+;
 ; Exit codes (standard Inno Setup):
 ;   0   success
 ;   1   setup was cancelled, or InitializeSetup returned False
 ;   2   uninstaller crashed
-;   3   prepare-to-install failed (e.g. REAPER could not be closed)
+;   3   prepare-to-install failed (only fires in UI mode now —
+;       happens when user refuses to close REAPER at the prompt;
+;       silent mode never returns 3 anymore)
 ;   4   prepare-to-install failed and uninstaller is required
 ;   5   user clicked Cancel during prepare-to-install
 ;
@@ -196,10 +206,25 @@ begin
     Sleep(500);
 end;
 
-// --- PrepareToInstall: kill REAPER if needed -------------------------------
+// --- PrepareToInstall: kill REAPER if needed (UI mode only) ----------------
 //
 // Returning a non-empty string from here causes Inno to abort with exit
-// code 3 (prepare-to-install failed). Headless callers can detect that.
+// code 3 (prepare-to-install failed).
+//
+// alpha.12 behaviour split:
+//   - SILENT / VERYSILENT mode: do nothing. Files are copied as-is. The
+//     intended caller is either (a) a first-time install where REAPER
+//     hasn't been opened yet, so file replacement succeeds cleanly, or
+//     (b) an in-app auto-updater that takes care of the locked-DLL
+//     problem on its own (e.g. by staging the new DLL into a sidecar
+//     path and asking REAPER to swap on next start). Pre-alpha.12 the
+//     installer used to taskkill /F reaper.exe in silent mode — that
+//     destroyed unsaved work and was the wrong default for callers who
+//     prefer to manage REAPER lifecycle themselves. If files happen to
+//     be locked, Inno's standard "file in use" handling fires.
+//   - UI mode (interactive double-click): unchanged. We still prompt
+//     the user, taskkill on confirmation, abort with exit code 3 on
+//     refusal. This keeps the click-through experience friendly.
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -208,16 +233,13 @@ begin
   Result := '';
   NeedsRestart := False;
 
-  if not IsReaperRunning() then
+  // Silent / very-silent callers manage REAPER lifecycle themselves.
+  // See block comment above for the rationale.
+  if WizardSilent then
     Exit;
 
-  if WizardSilent then
-  begin
-    if not TerminateReaper() then
-      Result := 'REAPER is running and could not be terminated. ' +
-                'Close REAPER and retry.';
+  if not IsReaperRunning() then
     Exit;
-  end;
 
   Response := MsgBox(
     'REAPER is currently running.' + #13#10#13#10 +
