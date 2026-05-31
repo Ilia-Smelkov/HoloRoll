@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.13] — 2026-05-08
+
+REAPER console stays clean by default. Debug output is opt-in via a
+single checkbox.
+
+### Added
+- **Runtime debug-log toggle.** New checkbox "Debug log" in the
+  overlay's Config section. When OFF (default), every `[holoroll] /
+  [holoroll-bridge] / [holoroll-debug]` line is suppressed —
+  including placement summaries, socket-bridge listening status,
+  hot-reload diagnostics, and the alpha.7..alpha.9 motion-debug
+  traces that we left in production code. When ON, all those lines
+  fire as before.
+- New config key `debug.enabled` (default `0`). Persisted in
+  `holoroll_config.ini`, round-tripped through the viewport
+  checkbox.
+
+### Changed
+- `ConsoleLog` and `SpikeLog` in `entry.cpp` now both check the
+  runtime `g_debugEnabled` atomic instead of a hardcoded
+  `kVerboseLog=false`. Through alpha.12, `SpikeLog` was always-on
+  (used for "the user MUST see this" paths like the v0.6 spike test
+  and the alpha.7 envelope-visibility debug). alpha.13 collapses
+  both into the same gate — if you want to see something, turn the
+  flag on.
+- Turning the flag ON also auto-pops REAPER's console window via
+  the existing `ForceShowReaperConsole()` helper. Turning it OFF
+  leaves the console as-is (it may have other plugins' output you
+  want to keep).
+
+### Removed
+- `kVerboseLog` build-time constant.
+
+### Migration
+- Headless setups / CI that scraped REAPER console for
+  `[holoroll] placed ...` lines need to either: (a) set
+  `debug.enabled = 1` in `holoroll_config.ini` before running, or
+  (b) tick the overlay checkbox once and let it persist. Recommended:
+  scrape post-state from REAPER project (items + regions) instead
+  of console output.
+
+
 ## [0.12.0-alpha.12] — 2026-05-08
 
 Installer policy tweak: stop force-killing REAPER in silent mode.
@@ -1392,7 +1434,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.12...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.13...HEAD
+[0.12.0-alpha.13]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.13
 [0.12.0-alpha.12]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.12
 [0.12.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.11
 [0.12.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.10

@@ -991,6 +991,20 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     if (ImGui::Button("Open config")) pendingRequests_.openConfig = true;
     ImGui::SameLine();
     if (ImGui::Button("Reload config")) pendingRequests_.reloadConfig = true;
+
+    // v0.12.0-alpha.13: runtime debug-log toggle. Default OFF — REAPER
+    // console stays clean during normal use. When ON, ConsoleLog and
+    // SpikeLog (in entry.cpp + socket_server.cpp shims) start writing
+    // every status / error / debug line to the console.
+    if (ImGui::Checkbox("Debug log", &debugEnabled_)) {
+      debugDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Show HoloRoll status / errors / debug lines in REAPER's\n"
+          "console. Off by default — the console stays clean unless\n"
+          "you turn this on. Persisted in holoroll_config.ini.");
+    }
   }
 
   if (ImGui::CollapsingHeader("Playback", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1714,5 +1728,21 @@ void GlViewport::GetPlacementOptions(float* preRollSec, float* postRollSec) cons
 bool GlViewport::ConsumePlacementDirty() {
   const bool was = placementDirty_;
   placementDirty_ = false;
+  return was;
+}
+
+// ---- v0.12.0-alpha.13 debug-log toggle ------------------------------------
+
+void GlViewport::SetDebugEnabled(bool enabled) {
+  debugEnabled_ = enabled;
+}
+
+bool GlViewport::GetDebugEnabled() const {
+  return debugEnabled_;
+}
+
+bool GlViewport::ConsumeDebugDirty() {
+  const bool was = debugDirty_;
+  debugDirty_ = false;
   return was;
 }

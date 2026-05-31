@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -32,6 +33,13 @@ FolderWatcher g_watcher;          // Watches the active project's Animations/.
 FolderWatcher g_incomingWatcher;  // Watches the global Incoming/ folder.
 reaper_plugin_info_t* g_rec = nullptr;
 HMODULE g_dllHandle = nullptr;
+
+// v0.12.0-alpha.13: runtime debug flag. When false (default), ConsoleLog
+// and SpikeLog silently no-op — the REAPER console stays quiet. Toggling
+// the "Debug log" checkbox in the overlay's Config section flips this
+// flag and persists `debug.enabled` to holoroll_config.ini. Atomic
+// because the socket bridge logs from worker threads.
+std::atomic<bool> g_debugEnabled{false};
 
 constexpr std::size_t kNoActiveAnim = std::numeric_limits<std::size_t>::max();
 std::size_t g_activeAnimIdx = kNoActiveAnim;
@@ -95,6 +103,9 @@ constexpr char kCfgKeySceneShowRefHuman[]   = "scene.show_reference_human";
 constexpr char kCfgKeyPlacementPreRoll[]       = "placement.pre_roll_seconds";
 constexpr char kCfgKeyPlacementPostRoll[]      = "placement.post_roll_seconds";
 
+// v0.12.0-alpha.13: runtime debug-log toggle persistence.
+constexpr char kCfgKeyDebugEnabled[]           = "debug.enabled";
+
 // Default subfolder name for project-relative animations storage. Convention
 // matches game-industry layouts (Animations/ alongside Audio/, Materials/,
 // etc.). Created automatically when a saved project is opened.
@@ -152,17 +163,23 @@ std::string ConfigFilePath() {
   return dir.empty() ? std::string(kConfigFileName) : dir + "\\" + kConfigFileName;
 }
 
-constexpr bool kVerboseLog = false;
+// v0.12.0-alpha.13: both loggers gate on g_debugEnabled. By default the
+// flag is false → REAPER console stays clean during normal operation.
+// The "Debug log" checkbox in the overlay's Config section flips it.
+//
+// Through alpha.12 we kept two log paths: ConsoleLog (gated by a build-
+// time kVerboseLog=false) and SpikeLog (always on, used for "show this
+// to the user no matter what" paths like the v0.6 spike test and the
+// alpha.7 envelope-debug). With a runtime flag both collapse into the
+// same gate; we keep the two names because there are many callers and
+// renaming them is pure churn.
 void ConsoleLog(const std::string& msg) {
-  if (!kVerboseLog) return;
+  if (!g_debugEnabled.load()) return;
   if (g_bridge.Api().showConsoleMsg) g_bridge.Api().showConsoleMsg(msg.c_str());
 }
 
-// Always-on console output for the v0.6.0 spike. The regular ConsoleLog is
-// silenced by default to keep the REAPER console clean during normal use,
-// but the spike specifically wants the user to see what happened so we use
-// a dedicated path that ignores kVerboseLog.
 void SpikeLog(const std::string& msg) {
+  if (!g_debugEnabled.load()) return;
   if (g_bridge.Api().showConsoleMsg) g_bridge.Api().showConsoleMsg(msg.c_str());
 }
 
@@ -204,6 +221,9 @@ void EnsureConfigDefaults() {
   // values (no reader, no writer).
   if (!g_config.Has(kCfgKeyPlacementPreRoll))   g_config.SetDouble(kCfgKeyPlacementPreRoll, 1.0);
   if (!g_config.Has(kCfgKeyPlacementPostRoll))  g_config.SetDouble(kCfgKeyPlacementPostRoll, 1.0);
+  // v0.12.0-alpha.13: debug log off by default. The user opts in via
+  // the "Debug log" checkbox in the overlay's Config section.
+  if (!g_config.Has(kCfgKeyDebugEnabled))       g_config.SetDouble(kCfgKeyDebugEnabled, 0.0);
 }
 
 // Read the configured region-name prefix and apply it to the AnimationLibrary
@@ -268,6 +288,27 @@ void PersistPlacementOptionsFromViewport() {
   g_config.SetDouble(kCfgKeyPlacementPreRoll, static_cast<double>(preRoll));
   g_config.SetDouble(kCfgKeyPlacementPostRoll, static_cast<double>(postRoll));
   g_config.Save();
+}
+
+// v0.12.0-alpha.13: round-trip the debug flag between config, viewport
+// checkbox, and the g_debugEnabled atomic. Same shape as the placement
+// pair above.
+void ApplyDebugFlagFromConfig() {
+  const bool enabled = g_config.GetDouble(kCfgKeyDebugEnabled, 0.0) >= 0.5;
+  g_debugEnabled.store(enabled);
+  g_viewport.SetDebugEnabled(enabled);
+}
+
+void PersistDebugFlagFromViewport() {
+  const bool enabled = g_viewport.GetDebugEnabled();
+  g_debugEnabled.store(enabled);
+  g_config.SetDouble(kCfgKeyDebugEnabled, enabled ? 1.0 : 0.0);
+  g_config.Save();
+  // When the user just turned the flag ON, pop the REAPER console window
+  // so they immediately see the lines that will follow. Turning it OFF
+  // does not auto-close the console (the user may have other plugins'
+  // output they want to keep visible).
+  if (enabled) ForceShowReaperConsole();
 }
 
 double GetFps() { return g_config.GetDouble(kCfgKeyFps, kDefaultFps); }
@@ -758,6 +799,8 @@ void OpenViewportIfNeeded() {
     ApplySceneSettingsToViewport();
     // v0.11.0: same for placement options.
     ApplyPlacementOptionsToViewport();
+    // v0.12.0-alpha.13: hydrate debug-log toggle from config.
+    ApplyDebugFlagFromConfig();
 
     // v0.9.0: register OLE drop target so files dragged from Explorer
     // onto the viewport land in the active project's Animations/ folder.
@@ -798,6 +841,8 @@ void ReloadConfigFromDisk() {
   if (g_viewport.IsOpen()) {
     ApplySceneSettingsToViewport();
     ApplyPlacementOptionsToViewport();
+    // alpha.13: pick up debug flag if the user edited the .ini directly.
+    ApplyDebugFlagFromConfig();
   }
   // Hot-reload toggle may have flipped.
   if (HotReloadEnabled() && !g_currentAnimationsFolder.empty() && !g_watcher.IsRunning()) {
@@ -1878,9 +1923,11 @@ void GenerateAllMotionMarkers() {
 //   6. UpdateArrange             → force REAPER to repaint the timeline so
 //                                  the new item is visible immediately.
 //
-// All output goes to the REAPER console regardless of kVerboseLog so the user
-// can see exactly what happened. If any of the API pointers are missing the
-// helper bails with a useful message and the rest of the plugin keeps working.
+// alpha.13: output goes via SpikeLog, which is gated by the runtime
+// g_debugEnabled flag. To see the spike's report, turn on "Debug log"
+// in the overlay's Config section before pressing the spike button.
+// If any of the API pointers are missing the helper bails (logged
+// only when debug is on) and the rest of the plugin keeps working.
 void SpikeTestCreateItem() {
   const auto& api = g_bridge.Api();
 
@@ -2249,6 +2296,10 @@ void OnTimer() {
     }
     if (g_viewport.ConsumePlacementDirty()) {
       PersistPlacementOptionsFromViewport();
+    }
+    // v0.12.0-alpha.13: debug flag round-trip. Same debounce window.
+    if (g_viewport.ConsumeDebugDirty()) {
+      PersistDebugFlagFromViewport();
     }
     lastSceneSaveTick = nowTicks;
   }

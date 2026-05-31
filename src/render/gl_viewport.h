@@ -130,6 +130,14 @@ class GlViewport {
                         bool* showBboxDims, bool* showGridLabels, bool* showRefHuman) const;
   bool ConsumeSceneDirty();
 
+  // ---- v0.12.0-alpha.13 debug flag --------------------------------------
+  // Mirror of the global g_debugEnabled atomic in entry.cpp. The
+  // overlay's Config-section checkbox edits this; OnTimer rolls dirty
+  // changes back into the global atomic and persists to config.
+  void SetDebugEnabled(bool enabled);
+  bool GetDebugEnabled() const;
+  bool ConsumeDebugDirty();
+
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   bool CreateContext();
@@ -211,6 +219,12 @@ class GlViewport {
   float placementPreRollSec_ = 1.0f;
   float placementPostRollSec_ = 1.0f;
   bool  placementDirty_ = false;
+
+  // v0.12.0-alpha.13: runtime debug-log toggle (mirrors entry.cpp's
+  // g_debugEnabled atomic). debugDirty_ fires when the user clicks the
+  // overlay checkbox; OnTimer in entry.cpp consumes it.
+  bool debugEnabled_ = false;
+  bool debugDirty_ = false;
 
   // -------- Input state --------
   POINT lastMousePos_{};
