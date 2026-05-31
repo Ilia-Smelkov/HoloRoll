@@ -89,8 +89,14 @@ struct State {
 };
 
 State g_state;
-std::atomic<bool> g_workerStarted{false};
-std::atomic<bool> g_workerDone{false};
+
+// alpha.2: replaced the alpha.1 g_workerStarted/g_workerDone pair with
+// a single g_workerActive flag, because we now spawn the worker more
+// than once per session (initial check + periodic re-poll + manual
+// "Check now"). g_sessionStarted is the one-shot guard for
+// state-hydration logic that only runs on the first Start() call.
+std::atomic<bool> g_sessionStarted{false};
+std::atomic<bool> g_workerActive{false};
 std::thread g_workerThread;
 
 }  // namespace
@@ -387,7 +393,6 @@ void WorkerMain() {
   if (!WinHttpGetText(wUrl, body)) {
     holoroll_bridge_log("[holoroll-updater] no network or GitHub unreachable; "
                         "will retry on next plugin start.\n");
-    g_workerDone.store(true);
     return;
   }
 
@@ -420,14 +425,12 @@ void WorkerMain() {
   } catch (const std::exception& e) {
     holoroll_bridge_log(std::string("[holoroll-updater] JSON parse failed: ") +
                         e.what() + "\n");
-    g_workerDone.store(true);
     return;
   }
 
   if (latestTag.empty() || installerUrl.empty()) {
     holoroll_bridge_log("[holoroll-updater] latest release missing tag_name or "
                         "matching installer asset.\n");
-    g_workerDone.store(true);
     return;
   }
 
@@ -438,7 +441,6 @@ void WorkerMain() {
   if (cmp <= 0) {
     holoroll_bridge_log(std::string("[holoroll-updater] up to date (installed=") +
                         HOLOROLL_VERSION_STRING + ", latest=" + latestTag + ")\n");
-    g_workerDone.store(true);
     return;
   }
 
@@ -446,7 +448,6 @@ void WorkerMain() {
   const std::string stagingDir = GetStagingDir();
   if (!EnsureDirExists(stagingDir)) {
     holoroll_bridge_log("[holoroll-updater] could not create staging dir.\n");
-    g_workerDone.store(true);
     return;
   }
   const std::string destPath = stagingDir + "\\" + installerName;
@@ -455,7 +456,6 @@ void WorkerMain() {
     holoroll_bridge_log("[holoroll-updater] installer download failed.\n");
     // Wipe partial file if any.
     DeleteFileA(destPath.c_str());
-    g_workerDone.store(true);
     return;
   }
 
@@ -480,8 +480,6 @@ void WorkerMain() {
   holoroll_bridge_log(std::string("[holoroll-updater] downloaded ") + installerName +
                       " (latest=" + latestTag + "); will install on REAPER close" +
                       (isDismissed ? " (dismissed by user)" : "") + ".\n");
-
-  g_workerDone.store(true);
 }
 
 // ---- Watchdog spawn ------------------------------------------------------
@@ -553,16 +551,35 @@ void SpawnInstallerWatchdog(const std::string& installerPath) {
 
 }  // namespace
 
+namespace {
+
+// alpha.2: internal helper that gates worker spawning. Returns true
+// iff a new worker was actually launched. Atomic CAS on g_workerActive
+// makes this safe to call from any thread (Start, Tick, CheckNow).
+// Joins the previous (finished) thread before spawning a new one so
+// we don't accumulate terminated std::thread objects across re-poll
+// cycles.
+bool LaunchWorker() {
+  if (g_workerActive.exchange(true)) return false;
+  if (g_workerThread.joinable()) g_workerThread.join();
+  g_workerThread = std::thread([]() {
+    WorkerMain();
+    g_workerActive.store(false);
+  });
+  return true;
+}
+
+}  // namespace
+
 // ---- Public API -----------------------------------------------------------
 
 namespace updater {
 
 void Start() {
-  if (g_workerStarted.exchange(true)) return;  // already started this session
+  if (g_sessionStarted.exchange(true)) return;  // hydration runs once per session
   ConfigStore& cfg = holoroll_config_ref();
   if (cfg.GetDouble(kCfgEnabled, 1.0) < 0.5) {
     holoroll_bridge_log("[holoroll-updater] update.enabled=0 — skipping check.\n");
-    g_workerDone.store(true);
     return;
   }
   // Hydrate UI state from previously-persisted "pending" record so the
@@ -594,7 +611,7 @@ void Start() {
     }
   }
 
-  g_workerThread = std::thread(WorkerMain);
+  LaunchWorker();
 }
 
 void Stop() {
@@ -617,8 +634,40 @@ void Stop() {
 }
 
 void Tick() {
-  // Reserved for future use (periodic re-check, progress UI updates).
-  // alpha.1 only polls once at Start.
+  // alpha.2: periodic re-poll. Cheap to call every OnTimer tick —
+  // we just look at the atomic + a double and bail out early in
+  // the steady state.
+  if (g_workerActive.load()) return;
+  ConfigStore& cfg = holoroll_config_ref();
+  if (cfg.GetDouble(kCfgEnabled, 1.0) < 0.5) return;
+
+  constexpr double kRecheckSeconds = 24.0 * 3600.0;
+  const double lastCheck = cfg.GetDouble(kCfgLastCheckUnix, 0.0);
+  const double now = static_cast<double>(std::time(nullptr));
+  if (now - lastCheck < kRecheckSeconds) return;
+
+  // 24 hours elapsed — re-poll. WorkerMain itself updates
+  // kCfgLastCheckUnix on success, so a network failure here means
+  // we'll try again on the NEXT Tick a moment later (no exponential
+  // backoff in alpha.2). Acceptable for now — the failure log line
+  // surfaces in the debug console.
+  LaunchWorker();
+}
+
+void CheckNow() {
+  // Manual "Check for updates" button. Same guards as Tick except
+  // we don't enforce the cooldown — the user explicitly asked.
+  ConfigStore& cfg = holoroll_config_ref();
+  if (cfg.GetDouble(kCfgEnabled, 1.0) < 0.5) {
+    holoroll_bridge_log("[holoroll-updater] CheckNow: update.enabled=0, ignoring.\n");
+    return;
+  }
+  if (g_workerActive.load()) {
+    holoroll_bridge_log("[holoroll-updater] CheckNow: a check is already in progress.\n");
+    return;
+  }
+  holoroll_bridge_log("[holoroll-updater] CheckNow: forcing immediate check.\n");
+  LaunchWorker();
 }
 
 bool HasReadyUpdate() {

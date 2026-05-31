@@ -1017,6 +1017,23 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     if (ImGui::Button("Open config")) pendingRequests_.openConfig = true;
     ImGui::SameLine();
     if (ImGui::Button("Reload config")) pendingRequests_.reloadConfig = true;
+    ImGui::SameLine();
+    // v0.13.0-alpha.2: manual "check for updates" trigger. Bypasses
+    // the 24-hour cooldown that Tick() enforces; respects only the
+    // master update.enabled toggle. Idempotent — clicking while a
+    // check is already in flight is a logged no-op. Result lands
+    // in the same banner at the top of this window once the worker
+    // finishes (usually a few seconds).
+    if (ImGui::Button("Check for updates")) {
+      updater::CheckNow();
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Poll GitHub Releases right now. Normally HoloRoll checks\n"
+          "once per plugin load + every 24 hours; this button skips\n"
+          "the wait. The banner at the top of this window shows the\n"
+          "result if a newer version is available.");
+    }
 
     // v0.12.0-alpha.13: runtime debug-log toggle. Default OFF — REAPER
     // console stays clean during normal use. When ON, ConsoleLog and

@@ -30,9 +30,17 @@ void Start();
 // closing. Otherwise just cleans up worker thread state. Idempotent.
 void Stop();
 
-// Called every OnTimer tick on the main thread. Mostly a no-op;
-// reserved for future use (periodic re-check, progress UI updates).
+// Called every OnTimer tick on the main thread. alpha.2: if no worker
+// is currently running and 24+ hours have passed since the last
+// successful check, kicks off a re-poll. Otherwise no-op.
 void Tick();
+
+// Manual "Check for updates now" — forces a poll regardless of the
+// 24h cooldown. Still respects `update.enabled` (master toggle):
+// if updates are off in config, this is a logged no-op.
+// Idempotent: clicking the button while a check is already in
+// progress is a no-op.
+void CheckNow();
 
 // ---- UI snapshot ----
 //

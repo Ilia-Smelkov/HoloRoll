@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0-alpha.2] — 2026-05-08
+
+Auto-updater gets the two missing pieces from alpha.1: periodic
+re-poll and a manual "Check for updates" button. No more reliance on
+plugin reload to discover new releases.
+
+### Added
+- **Periodic re-poll** in `updater::Tick()`. Every OnTimer tick we
+  check elapsed time since `update.last_check_unix`; if 24 hours
+  have passed and no worker is currently in flight, kick off a
+  background re-poll. Steady-state cost is one atomic load + one
+  double compare per tick — cheap.
+- **Manual "Check for updates" button** in the overlay's Config
+  section, next to "Open config" / "Reload config". Calls
+  `updater::CheckNow()`, which bypasses the 24-hour cooldown but
+  still respects the `update.enabled` master toggle and the
+  in-flight guard. Tooltip explains the cadence.
+
+### Changed
+- **Worker spawn refactored** to support being called more than
+  once per session. Replaced the alpha.1 `g_workerStarted` /
+  `g_workerDone` pair with a single `g_workerActive` atomic;
+  `g_sessionStarted` becomes a one-shot guard for the
+  hydration-from-config block in `Start()`. New internal
+  `LaunchWorker()` helper joins the previous (finished) thread
+  before spawning a new one — no leaked std::thread objects across
+  re-poll cycles.
+
+### Known limitations (carried over from alpha.1)
+- Re-poll cadence is hardcoded at 24 hours. Could be
+  `update.check_interval_hours` if we ever need finer control.
+- A failed network round-trip resets nothing — next Tick (a moment
+  later) will try again. Acceptable noise for now since failures
+  are logged only when debug is on. Could add exponential backoff
+  if it bites.
+- Manual "Check" button doesn't surface progress while the worker
+  is running; the banner just appears (or doesn't) a few seconds
+  later. Visible progress would need a separate UI state.
+
+
 ## [0.13.0-alpha.1] — 2026-05-08
 
 Plugin starts auto-updating itself from GitHub Releases. New versions
@@ -1657,7 +1697,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.13.0-alpha.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.13.0-alpha.2...HEAD
+[0.13.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.2
 [0.13.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.1
 [0.12.0-alpha.15]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.15
 [0.12.0-alpha.14]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.14
