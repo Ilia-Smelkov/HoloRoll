@@ -79,6 +79,15 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.preventUIRefresh        = reinterpret_cast<PreventUIRefreshFn>(rec->GetFunc("PreventUIRefresh"));
   api.addRemoveReaScript      = reinterpret_cast<AddRemoveReaScriptFn>(rec->GetFunc("AddRemoveReaScript"));
 
+  // v0.12.0-alpha.15: socket bridge — action registration / shortcut
+  // introspection / edit cursor.
+  api.reverseNamedCommandLookup = reinterpret_cast<ReverseNamedCommandLookupFn>(rec->GetFunc("ReverseNamedCommandLookup"));
+  api.namedCommandLookup        = reinterpret_cast<NamedCommandLookupFn>(rec->GetFunc("NamedCommandLookup"));
+  api.getCursorPosition         = reinterpret_cast<GetCursorPositionFn>(rec->GetFunc("GetCursorPosition"));
+  api.sectionFromUniqueID       = reinterpret_cast<SectionFromUniqueIDFn>(rec->GetFunc("SectionFromUniqueID"));
+  api.countActionShortcuts      = reinterpret_cast<CountActionShortcutsFn>(rec->GetFunc("CountActionShortcuts"));
+  api.getActionShortcutDesc     = reinterpret_cast<GetActionShortcutDescFn>(rec->GetFunc("GetActionShortcutDesc"));
+
   return api.getPlayPosition && api.mainOnCommand;
 }
 

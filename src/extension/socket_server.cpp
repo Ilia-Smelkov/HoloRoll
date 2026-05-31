@@ -273,17 +273,144 @@ json HandleRunScript(const json& args) {
   return json{{"ran", true}};
 }
 
+// ---- v0.12.0-alpha.15 verbs ----------------------------------------------
+//
+// register_action / script_shortcut / assign_shortcut all share the same
+// "ensure registered, get numeric cmd id" prelude. AddRemoveReaScript
+// is idempotent: re-registering the same path returns the same command
+// id, so calling it from every verb is cheap and safe.
+
+// Section 0 == main keyboard section. Hardcoded here because that's where
+// scripts land via AddRemoveReaScript(sectionID=0).
+constexpr int kMainSectionUniqueId = 0;
+
+// REAPER native action ID for "Show action list". Hardcoded — there's no
+// stable named-command equivalent. If a future REAPER renumbers this we'll
+// need to adjust; verified against REAPER 6.x / 7.x as of authoring.
+constexpr int kShowActionListCmd = 40605;
+
+// Shared helper: register the script and return the numeric command id.
+// Throws VerbError on missing API / failed registration.
+int EnsureScriptRegistered(const std::string& path) {
+  const auto& api = g_bridge.Api();
+  if (!api.addRemoveReaScript) {
+    throw VerbError("REAPER API 'AddRemoveReaScript' not available");
+  }
+  const int cmd = api.addRemoveReaScript(/*isAdd=*/true,
+                                          /*sectionID=*/kMainSectionUniqueId,
+                                          path.c_str(), /*commit=*/true);
+  if (cmd == 0) {
+    throw VerbError("AddRemoveReaScript returned 0 — script missing or "
+                    "could not be registered: " + path);
+  }
+  return cmd;
+}
+
+// Get the named command id ("_RS<hash>") for a numeric command id, or
+// empty string if the command isn't a named one. ReverseNamedCommandLookup
+// returns the name WITHOUT the leading underscore; we prepend it so the
+// returned string matches the form used in reaper-kb.ini and the form
+// callers usually paste into their own configs.
+std::string NamedIdForCommand(int cmd) {
+  const auto& api = g_bridge.Api();
+  if (!api.reverseNamedCommandLookup) return {};
+  const char* raw = api.reverseNamedCommandLookup(cmd);
+  if (!raw || !raw[0]) return {};
+  return std::string("_") + raw;
+}
+
+json HandleRegisterAction(const json& args) {
+  if (!args.contains("path") || !args["path"].is_string()) {
+    throw VerbError("missing or invalid 'path' argument (expected string)");
+  }
+  const std::string path = args["path"].get<std::string>();
+  const int cmd = EnsureScriptRegistered(path);
+  const std::string namedId = NamedIdForCommand(cmd);
+  return json{{"command_id", namedId}};
+}
+
+json HandleScriptShortcut(const json& args) {
+  const auto& api = g_bridge.Api();
+  if (!args.contains("path") || !args["path"].is_string()) {
+    throw VerbError("missing or invalid 'path' argument (expected string)");
+  }
+  const std::string path = args["path"].get<std::string>();
+  const int cmd = EnsureScriptRegistered(path);
+  const std::string namedId = NamedIdForCommand(cmd);
+
+  // Look up the shortcut text. We grab the FIRST registered shortcut
+  // (shortcutidx=0) — REAPER supports multiple bindings per action but
+  // most users assign just one; surfacing all of them would force the
+  // caller into an awkward array shape for the common case.
+  std::string shortcutText;
+  if (api.sectionFromUniqueID && api.countActionShortcuts && api.getActionShortcutDesc) {
+    KbdSectionInfo* section = api.sectionFromUniqueID(kMainSectionUniqueId);
+    if (section && api.countActionShortcuts(section, cmd) > 0) {
+      char buf[256] = {};
+      if (api.getActionShortcutDesc(section, cmd, /*shortcutidx=*/0,
+                                    buf, sizeof(buf))) {
+        shortcutText = buf;
+      }
+    }
+  }
+
+  return json{{"shortcut", shortcutText}, {"command_id", namedId}};
+}
+
+json HandleAssignShortcut(const json& args) {
+  const auto& api = g_bridge.Api();
+  if (!args.contains("path") || !args["path"].is_string()) {
+    throw VerbError("missing or invalid 'path' argument (expected string)");
+  }
+  const std::string path = args["path"].get<std::string>();
+  // Register so the script appears in the action list with a stable id;
+  // user can then assign / clear shortcuts directly via REAPER's dialog.
+  EnsureScriptRegistered(path);
+
+  if (!api.mainOnCommand) {
+    throw VerbError("REAPER API 'Main_OnCommand' not available");
+  }
+  // Just open the action list. We deliberately don't try to filter or
+  // pre-select — REAPER's own shortcut-assignment / conflict-resolution
+  // dialog flow takes over from here. Optional "copy script name to
+  // clipboard for quick filter" — skipping for now, can be added if
+  // it turns out to be friction in practice.
+  api.mainOnCommand(kShowActionListCmd, 0);
+  return json{{"opened", true}};
+}
+
+json HandleGetCursor(const json& /*args*/) {
+  const auto& api = g_bridge.Api();
+  // Prefer the non-Ex form (no project arg, always current project) —
+  // matches the spec verbatim. Fall back to GetCursorPositionEx(nullptr)
+  // for older REAPER builds that somehow only export the Ex variant.
+  double pos = 0.0;
+  if (api.getCursorPosition) {
+    pos = api.getCursorPosition();
+  } else if (api.getCursorPositionEx) {
+    pos = api.getCursorPositionEx(nullptr);
+  } else {
+    throw VerbError("REAPER API 'GetCursorPosition' not available");
+  }
+  return json{{"position", pos}};
+}
+
 // Build the reply line for a request. Catches handler exceptions and
 // converts them to {"ok":false,"error":"..."} replies.
 std::string DispatchVerb(const std::string& method, const json& args) {
   try {
     json result;
-    if      (method == "ping")           result = HandlePing(args);
-    else if (method == "get_selection")  result = HandleGetSelection(args);
-    else if (method == "get_regions")    result = HandleGetRegions(args);
-    else if (method == "clear_regions")  result = HandleClearRegions(args);
-    else if (method == "create_regions") result = HandleCreateRegions(args);
-    else if (method == "run_script")     result = HandleRunScript(args);
+    if      (method == "ping")             result = HandlePing(args);
+    else if (method == "get_selection")    result = HandleGetSelection(args);
+    else if (method == "get_regions")      result = HandleGetRegions(args);
+    else if (method == "clear_regions")    result = HandleClearRegions(args);
+    else if (method == "create_regions")   result = HandleCreateRegions(args);
+    else if (method == "run_script")       result = HandleRunScript(args);
+    // v0.12.0-alpha.15:
+    else if (method == "register_action")  result = HandleRegisterAction(args);
+    else if (method == "script_shortcut")  result = HandleScriptShortcut(args);
+    else if (method == "assign_shortcut")  result = HandleAssignShortcut(args);
+    else if (method == "get_cursor")       result = HandleGetCursor(args);
     else throw VerbError("unknown_method: " + method);
 
     return json{{"ok", true}, {"result", result}}.dump();

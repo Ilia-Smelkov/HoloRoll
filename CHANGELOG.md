@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.15] — 2026-05-08
+
+Socket bridge gets four more verbs to make external scripts feel
+first-class: register-without-run, shortcut introspection, shortcut
+assignment via REAPER's own dialog, and edit-cursor query.
+
+### Added — 4 new bridge verbs (`src/extension/socket_server.cpp`)
+
+- **`register_action`** — `{"path":"<absolute .lua>"}` →
+  `{"command_id":"_RS<hash>"}`. Calls
+  `AddRemoveReaScript(true, 0, path, true)` and resolves the named
+  command id via `ReverseNamedCommandLookup`. Idempotent: re-
+  registering the same path returns the same id. Does NOT run the
+  script — just makes it visible in REAPER's action list with a
+  stable id the caller can refer to later.
+- **`script_shortcut`** — `{"path":"<...>.lua"}` →
+  `{"shortcut":"<text or empty>","command_id":"_RS<hash>"}`. Registers
+  if needed, then `CountActionShortcuts(main, cmd)` →
+  `GetActionShortcutDesc(main, cmd, 0, ...)` returns the first bound
+  shortcut text (e.g. `"Ctrl+Shift+T"`); empty if no shortcut bound.
+  Only the FIRST shortcut is surfaced — REAPER allows multiple
+  bindings per action but the common case is one.
+- **`assign_shortcut`** — `{"path":"<...>.lua"}` →
+  `{"opened":true}`. Registers if needed, then issues
+  `Main_OnCommand(40605, 0)` ("Show action list"). The user
+  finishes the assignment from REAPER's native dialog — conflict
+  detection and shortcut removal handled there. We deliberately
+  don't try to pre-select / pre-filter the row; REAPER's filter box
+  takes plain text. (Optional "copy script name to clipboard"
+  refinement deferred.)
+- **`get_cursor`** — `{}` → `{"position":<float seconds>}`. Reads
+  the edit cursor via `GetCursorPosition()` (falls back to
+  `GetCursorPositionEx(nullptr)` on builds that only export the
+  Ex variant).
+
+### Added — REAPER API bindings
+- `ReverseNamedCommandLookup`, `NamedCommandLookup` — convert
+  between numeric command ids and `"<extension>_<action>"` named
+  strings. We use the reverse direction in `register_action` /
+  `script_shortcut` to surface the named id callers store.
+- `GetCursorPosition` — for `get_cursor`.
+- `SectionFromUniqueID`, `CountActionShortcuts`,
+  `GetActionShortcutDesc` — for `script_shortcut`. Main keyboard
+  section is `SectionFromUniqueID(0)`.
+
+### Design notes
+- **No `reaper-kb.ini` writing.** REAPER exposes no API for
+  programmatic shortcut assignment; the keybindings file is its
+  internal format. `assign_shortcut` is the canonical answer —
+  open the dialog, let REAPER handle conflict resolution. A
+  hypothetical "delete shortcut" verb is also unnecessary for the
+  same reason: the user removes shortcuts from the same dialog.
+- **Action ID `40605` ("Show action list")** is hardcoded. Verified
+  against REAPER 6.x / 7.x as of writing; if a future REAPER
+  renumbers it, this verb stops working and we need to update
+  the constant. (No stable named-command equivalent exists for
+  this native action.)
+- All four verbs run on REAPER's main thread (via `Tick()`
+  drain in `OnTimer`) — same rule as the alpha.11 verbs, every
+  REAPER C API call lives on the main thread.
+
+### Client integration
+- External apps can now: register a script and remember its
+  `_RS<hash>` id; periodically poll the shortcut text to keep their
+  own UI in sync; open the REAPER dialog when the user wants to
+  bind / rebind / clear a shortcut; query the edit cursor for
+  marker / item placement without having to also poll the
+  transport.
+
+
 ## [0.12.0-alpha.14] — 2026-05-08
 
 HoloRoll now works on Untitled (never-saved) REAPER projects. The
@@ -1485,7 +1555,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.14...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.15...HEAD
+[0.12.0-alpha.15]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.15
 [0.12.0-alpha.14]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.14
 [0.12.0-alpha.13]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.13
 [0.12.0-alpha.12]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.12

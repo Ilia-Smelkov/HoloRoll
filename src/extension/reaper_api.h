@@ -156,6 +156,23 @@ using PreventUIRefreshFn       = void (*)(int prevent_count);
 using AddRemoveReaScriptFn     = int (*)(bool isAdd, int sectionID,
                                          const char* scriptfn, bool commit);
 
+// ---- v0.12.0-alpha.15 socket-bridge APIs (register / shortcut / cursor) -
+//
+// register_action returns a string named command id (e.g. "_RS1234abcd")
+// — that's what ReverseNamedCommandLookup is for. script_shortcut /
+// assign_shortcut work against the main keyboard section, which we
+// obtain via SectionFromUniqueID(0). KbdSectionInfo is opaque to us;
+// we never dereference it, just pass the pointer through.
+class KbdSectionInfo;
+using ReverseNamedCommandLookupFn = const char* (*)(int command_id);
+using NamedCommandLookupFn        = int (*)(const char* command_name);
+using GetCursorPositionFn         = double (*)();
+using SectionFromUniqueIDFn       = KbdSectionInfo* (*)(int uniqueID);
+using CountActionShortcutsFn      = int (*)(KbdSectionInfo* section, int cmdID);
+using GetActionShortcutDescFn     = bool (*)(KbdSectionInfo* section, int cmdID,
+                                             int shortcutidx,
+                                             char* descOut, int descOut_sz);
+
 struct ReaperApi {
   GetPlayPositionFn getPlayPosition = nullptr;
   GetPlayStateFn getPlayState = nullptr;
@@ -225,6 +242,15 @@ struct ReaperApi {
   Undo_EndBlockFn          undo_EndBlock = nullptr;
   PreventUIRefreshFn       preventUIRefresh = nullptr;
   AddRemoveReaScriptFn     addRemoveReaScript = nullptr;
+
+  // v0.12.0-alpha.15: socket bridge — register_action, script_shortcut,
+  // assign_shortcut, get_cursor verbs.
+  ReverseNamedCommandLookupFn reverseNamedCommandLookup = nullptr;
+  NamedCommandLookupFn        namedCommandLookup = nullptr;
+  GetCursorPositionFn         getCursorPosition = nullptr;
+  SectionFromUniqueIDFn       sectionFromUniqueID = nullptr;
+  CountActionShortcutsFn      countActionShortcuts = nullptr;
+  GetActionShortcutDescFn     getActionShortcutDesc = nullptr;
 };
 
 bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api);
