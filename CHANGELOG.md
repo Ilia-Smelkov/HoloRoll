@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.14] — 2026-05-08
+
+HoloRoll now works on Untitled (never-saved) REAPER projects. The
+"save the project first" architectural restriction from v0.7/v0.8 is
+gone — replaced with a per-user default fallback folder.
+
+### Added
+- **Default animations folder for Untitled projects.** New third-priority
+  fallback in `ResolveActiveAnimationsFolder()`. When the project is
+  Untitled (no override, no .rpp on disk), HoloRoll uses
+  `%APPDATA%\REAPER\UserPlugins\HoloRollDefault\`. Folder is created
+  lazily on first use.
+- **New config key `default_animations_folder`** (default empty →
+  resolves to the path above). User can edit `holoroll_config.ini`
+  to point the fallback somewhere else, e.g. a shared scratch drive.
+- **Overlay banner** "(default folder - project not saved yet)" in
+  yellow under the folder path when the fallback is active, so it's
+  clear why files might not land next to a .rpp.
+
+### Removed
+- "Save the REAPER project to enable HoloRoll" centered message in
+  the viewport. Untitled projects now render the normal scene + UI.
+- The amber drop-rejection state "Save the REAPER project first"
+  (the drop overlay's amber colour stays as a defensive fallback,
+  but the user-facing text is now "Drops are not currently
+  accepted" — it should be unreachable in normal operation).
+- The Library-section if/else branch that previously hid all library
+  controls on Untitled projects.
+
+### Behaviour on project state transitions
+- **Open REAPER + Untitled project** → default folder used; drops,
+  Incoming/ drain, Place all all work.
+- **Save Untitled → `MyProject.rpp`** → next OnTimer tick switches
+  to `<project_dir>/Animations/MyProject/`. Library rescans new
+  folder. Files that accumulated in the default folder STAY there —
+  no auto-migration. (Manual migration UI is a possible follow-up.)
+- **Open already-saved project** → behaves as before (project-relative
+  folder, never touches the default).
+
+### Rationale / history
+- The Untitled-blocks-everything model came in v0.7.0/v0.8.0 (rolled
+  into v0.9.0) when we switched from a global `animations_dir` config
+  to per-project folders. At the time it made sense: if there's no
+  .rpp, there's no place to put files. But the constraint hurt
+  experimentation, auto-py integrations, and the new socket bridge
+  (alpha.11) where external apps drive HoloRoll without caring about
+  project state. The fallback folder fixes the symptom without
+  giving up the project-relative-by-default design (saved projects
+  still get their own isolated folders, like before).
+
+
 ## [0.12.0-alpha.13] — 2026-05-08
 
 REAPER console stays clean by default. Debug output is opt-in via a
@@ -1434,7 +1485,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.13...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.14...HEAD
+[0.12.0-alpha.14]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.14
 [0.12.0-alpha.13]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.13
 [0.12.0-alpha.12]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.12
 [0.12.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.11

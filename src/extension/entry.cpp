@@ -106,6 +106,12 @@ constexpr char kCfgKeyPlacementPostRoll[]      = "placement.post_roll_seconds";
 // v0.12.0-alpha.13: runtime debug-log toggle persistence.
 constexpr char kCfgKeyDebugEnabled[]           = "debug.enabled";
 
+// v0.12.0-alpha.14: fallback animations folder used when the active
+// REAPER project is Untitled (never saved). Resolves third in the
+// chain after the project-level override and the project-relative
+// folder. Default location is created lazily on first use.
+constexpr char kCfgKeyDefaultAnimationsFolder[] = "default_animations_folder";
+
 // Default subfolder name for project-relative animations storage. Convention
 // matches game-industry layouts (Animations/ alongside Audio/, Materials/,
 // etc.). Created automatically when a saved project is opened.
@@ -134,6 +140,15 @@ constexpr char kHoloRollItemPostRollKey[] = "P_EXT:holoroll_post";
 // active project's Animations/ folder on next OnTimer tick. Path is
 // %APPDATA%\REAPER\UserPlugins\HoloRollIncoming — i.e. next to the DLL.
 constexpr char kIncomingSubdir[] = "HoloRollIncoming";
+
+// v0.12.0-alpha.14: default fallback for Untitled projects. Same parent
+// directory as Incoming/ — sits next to the DLL under
+// %APPDATA%\REAPER\UserPlugins\HoloRollDefault. Used by
+// ResolveActiveAnimationsFolder() as the third-priority fallback when
+// there's no project-level override and no saved .rpp. User can edit
+// `default_animations_folder` in holoroll_config.ini to point it
+// somewhere else.
+constexpr char kDefaultAnimationsSubdir[] = "HoloRollDefault";
 
 constexpr char kToggleViewportCommandName[] = "MDDVIEWPORT_TOGGLE";
 constexpr char kToggleViewportActionDesc[] = "HoloRoll: Toggle Viewport";
@@ -224,6 +239,14 @@ void EnsureConfigDefaults() {
   // v0.12.0-alpha.13: debug log off by default. The user opts in via
   // the "Debug log" checkbox in the overlay's Config section.
   if (!g_config.Has(kCfgKeyDebugEnabled))       g_config.SetDouble(kCfgKeyDebugEnabled, 0.0);
+  // v0.12.0-alpha.14: default animations folder for Untitled projects.
+  // Seeded once on first run; the user can edit the .ini to change it.
+  // We resolve the actual path lazily (DefaultAnimationsFolder() below)
+  // because GetIncomingFolder relies on g_dllHandle which may not be
+  // set yet at the time EnsureConfigDefaults runs.
+  if (!g_config.Has(kCfgKeyDefaultAnimationsFolder)) {
+    g_config.SetString(kCfgKeyDefaultAnimationsFolder, std::string{});
+  }
 }
 
 // Read the configured region-name prefix and apply it to the AnimationLibrary
@@ -404,27 +427,36 @@ bool EnsureFolderExists(const std::string& path) {
          GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
-// Resolve the animations folder for the current project state. Returns
-// empty string if no folder is currently usable (Untitled project).
+// v0.12.0-alpha.14: resolve the default animations folder used when
+// neither a project-level override nor a saved-project path is
+// available. Reads from the `default_animations_folder` config key;
+// if that's empty, falls back to %APPDATA%\REAPER\UserPlugins\HoloRollDefault.
+std::string DefaultAnimationsFolder() {
+  const std::string fromConfig = g_config.GetString(kCfgKeyDefaultAnimationsFolder, std::string{});
+  if (!fromConfig.empty()) return fromConfig;
+
+  // Same parent directory as Incoming/ — sits next to the DLL.
+  const std::string base = DirOfModule(g_dllHandle);
+  if (base.empty()) return {};
+  return base + "\\" + kDefaultAnimationsSubdir;
+}
+
+// Resolve the animations folder for the current project state. Always
+// returns a non-empty path as of alpha.14 — Untitled projects fall back
+// to the per-user default folder instead of being a hard-stop.
 //
-// v0.10.1 layout: each project gets its own subfolder under a shared
-// `Animations/` directory next to the .rpp:
-//
-//   <project_dir>/
-//     MyLevel.rpp
-//     BossFight.rpp
-//     Animations/
-//       MyLevel/      <-- belongs to MyLevel.rpp
-//         frog_jump.glb
-//       BossFight/    <-- belongs to BossFight.rpp
-//         enemy_hit.glb
-//
-// This isolates assets between projects that share a directory. Replaces
-// the v0.7.0 layout (`<project_dir>/Animations/` shared across all .rpps
-// in the same dir) without backward compatibility — any existing v0.7–v0.10
-// project will see an empty library after upgrade and needs its files
-// moved into the new `Animations/<project_name>/` location, or a manual
-// `Choose folder...` override pointing at the old shared path.
+// Resolution order:
+//   1. Project-level override (set via "Choose folder..." on a saved
+//      project, stored in the .rpp). Wins even when the project is
+//      Untitled — the user explicitly picked it.
+//   2. <project_dir>/Animations/<project_basename>/ — auto-derived from
+//      the saved .rpp path (v0.10.1 layout: each project gets its own
+//      subfolder so two .rpps in the same dir don't share a library).
+//   3. Default fallback (alpha.14+). Lets the plugin work on Untitled
+//      projects, drag-n-drop, and Incoming/ drain when no project is
+//      saved yet. When the user eventually saves the project, future
+//      operations switch to (2); files that accumulated in the default
+//      folder STAY there — no auto-migration.
 std::string ResolveActiveAnimationsFolder() {
   // Override always wins, even if the project hasn't been saved yet (the
   // user explicitly pointed Choose folder... somewhere).
@@ -432,15 +464,16 @@ std::string ResolveActiveAnimationsFolder() {
   if (!override.empty()) return override;
 
   const std::string proj = GetActiveProjectPath();
-  if (proj.empty()) return {};  // Untitled project, no default available.
+  if (!proj.empty()) {
+    const std::string projDir = DirOfPath(proj);
+    const std::string projBasename = ProjectBasenameFromPath(proj);
+    if (!projDir.empty() && !projBasename.empty()) {
+      return projDir + "\\" + kProjectAnimationsSubdir + "\\" + projBasename;
+    }
+  }
 
-  const std::string projDir = DirOfPath(proj);
-  if (projDir.empty()) return {};
-
-  const std::string projBasename = ProjectBasenameFromPath(proj);
-  if (projBasename.empty()) return {};
-
-  return projDir + "\\" + kProjectAnimationsSubdir + "\\" + projBasename;
+  // alpha.14: third-priority fallback for Untitled projects.
+  return DefaultAnimationsFolder();
 }
 
 // ---- v0.8.0 Incoming folder + auto-move ----------------------------------
@@ -565,9 +598,11 @@ std::size_t DrainIncomingToProject() {
 // Animations/ folder — the project-folder watcher then picks them up via
 // the regular hot-reload path (modal -> place items at cursor).
 //
-// Untitled projects can't accept drops (there's no project folder to put
-// them in). We log a single-line message instead of crashing or showing a
-// modal; the Untitled overlay already says "Save the REAPER project".
+// alpha.14: ResolveActiveAnimationsFolder now always returns a usable
+// folder (project-relative when saved, per-user default fallback when
+// Untitled), so the only way this path bails is if the resolver itself
+// returns empty — a very-early-init edge case where g_dllHandle isn't
+// set yet. Log + skip silently rather than crashing.
 void OnViewportFilesDropped(const std::vector<std::string>& paths) {
   if (paths.empty()) return;
 
@@ -802,11 +837,11 @@ void OpenViewportIfNeeded() {
     // v0.12.0-alpha.13: hydrate debug-log toggle from config.
     ApplyDebugFlagFromConfig();
 
-    // v0.9.0: register OLE drop target so files dragged from Explorer
-    // onto the viewport land in the active project's Animations/ folder.
-    // The acceptance query lets the drop overlay show an amber "save the
-    // project first" hint instead of a green "drop here" when the project
-    // is Untitled.
+    // v0.9.0 / alpha.14: register OLE drop target so files dragged from
+    // Explorer onto the viewport land in the active animations folder.
+    // alpha.14 dropped the Untitled-project rejection — drops now always
+    // accept because ResolveActiveAnimationsFolder() falls back to the
+    // per-user default folder when the project is Untitled.
     drop_target::RegisterOnHwnd(
         g_viewport.Hwnd(),
         OnViewportFilesDropped,

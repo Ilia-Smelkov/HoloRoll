@@ -895,33 +895,34 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   ImGui::Begin("HoloRoll", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
   if (ImGui::CollapsingHeader("Library", ImGuiTreeNodeFlags_DefaultOpen)) {
-    if (status.projectUntitled) {
-      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                         "Save the REAPER project to enable HoloRoll.");
-      ImGui::TextWrapped("HoloRoll uses a project-relative folder "
-                         "(<project>/Animations/) to know where animations live. "
-                         "Until you save the project, there is no place to look.");
-    } else {
-      ImGui::TextWrapped("Folder: %s", status.animationsDir.empty() ? "(not set)" : status.animationsDir.c_str());
-      if (status.folderIsOverride) {
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f),
-                           "(override - not the project default)");
-      }
-      ImGui::Text("Loaded: %u animation(s), %u item(s) on timeline",
-                  static_cast<unsigned>(status.loadedAnimationCount),
-                  static_cast<unsigned>(status.regionCount));
-      ImGui::Text("Active: %s", status.currentAnimation.empty() ? "(none)" : status.currentAnimation.c_str());
-      if (status.activeRegionEnd > status.activeRegionStart) {
-        ImGui::Text("Item time: %.3fs .. %.3fs", status.activeRegionStart, status.activeRegionEnd);
-      }
+    // alpha.14: no more Untitled-project gate here. The folder shown
+    // either resolves to a project-relative path (saved project), a
+    // user-set override, or the per-user default folder (Untitled).
+    // A small info banner tells the user when they're on the default
+    // fallback so they understand why files might land somewhere
+    // other than next to their .rpp.
+    ImGui::TextWrapped("Folder: %s", status.animationsDir.empty() ? "(not set)" : status.animationsDir.c_str());
+    if (status.folderIsOverride) {
+      ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f),
+                         "(override - not the project default)");
+    } else if (status.projectUntitled) {
+      ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f),
+                         "(default folder - project not saved yet)");
+    }
+    ImGui::Text("Loaded: %u animation(s), %u item(s) on timeline",
+                static_cast<unsigned>(status.loadedAnimationCount),
+                static_cast<unsigned>(status.regionCount));
+    ImGui::Text("Active: %s", status.currentAnimation.empty() ? "(none)" : status.currentAnimation.c_str());
+    if (status.activeRegionEnd > status.activeRegionStart) {
+      ImGui::Text("Item time: %.3fs .. %.3fs", status.activeRegionStart, status.activeRegionEnd);
+    }
 
-      // Warning: an item is under the playhead but its name does not match any
-      // animation in the current library. Shows in red so it's hard to miss.
-      if (!status.missingAnimationName.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
-                           "⚠ Animation '%s' not found",
-                           status.missingAnimationName.c_str());
-      }
+    // Warning: an item is under the playhead but its name does not match any
+    // animation in the current library. Shows in red so it's hard to miss.
+    if (!status.missingAnimationName.empty()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
+                         "⚠ Animation '%s' not found",
+                         status.missingAnimationName.c_str());
     }
 
     if (ImGui::Button("Choose folder...")) pendingRequests_.chooseFolder = true;
@@ -1172,8 +1173,16 @@ int GlViewport::DrawNewAnimationsModal(const std::vector<std::string>& pending) 
 //
 // Three states drive the visual:
 //   - valid + host accepts          → green, "Drop here to add to project"
-//   - valid + host rejects (Untitled) → amber, "Save the REAPER project first"
+//   - valid + host rejects (rare,    → amber, "Drops are not currently
+//     internal error path: only         accepted"
+//     fires when ResolveActive-
+//     AnimationsFolder returns ""
+//     during plugin init)
 //   - not valid (wrong extensions)  → red,   "Unsupported file type"
+//
+// alpha.14 dropped the Untitled-project amber-state — the resolver now
+// always returns a usable folder (project-relative or default fallback),
+// so drops succeed even on Untitled projects.
 //
 // The overlay consists of three layers, drawn into ImGui's foreground draw
 // list so they sit above any window:
@@ -1202,7 +1211,7 @@ void DrawDropOverlayImGui(const drop_target::DragState& state) {
     borderColor = IM_COL32(240, 180, 50, 255);   // amber
     plateColor  = IM_COL32(60, 40, 10, 235);
     textColor   = IM_COL32(255, 230, 180, 255);
-    message     = "Save the REAPER project first";
+    message     = "Drops are not currently accepted";
   } else {
     borderColor = IM_COL32(220, 80, 80, 255);    // red
     plateColor  = IM_COL32(60, 20, 20, 235);
@@ -1527,48 +1536,15 @@ void GlViewport::Render(const std::vector<float>& vertices,
   viewportWidth_ = (rc.right - rc.left) > 0 ? (rc.right - rc.left) : 1;
   viewportHeight_ = (rc.bottom - rc.top) > 0 ? (rc.bottom - rc.top) : 1;
 
-  // v0.8.0: Untitled-project early-out. Skip the 3D scene, gizmo, overlay,
-  // background gradient, ground plane — everything except a single centered
-  // message. The dock window is otherwise idle / empty so the user knows
-  // the plugin is intentionally inactive, not broken.
-  if (status.projectUntitled) {
-    glViewport(0, 0, viewportWidth_, viewportHeight_);
-    glClearColor(0.10f, 0.10f, 0.12f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    if (imguiInitialized_) {
-      ImGui_ImplOpenGL3_NewFrame();
-      ImGui_ImplWin32_NewFrame();
-      ImGui::NewFrame();
-
-      const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-      const char* msg = "Save the REAPER project to enable HoloRoll";
-      const ImVec2 textSize = ImGui::CalcTextSize(msg);
-      ImGui::SetNextWindowPos(ImVec2((displaySize.x - textSize.x) * 0.5f - 16.0f,
-                                     (displaySize.y - textSize.y) * 0.5f - 8.0f));
-      ImGui::SetNextWindowBgAlpha(0.0f);
-      ImGui::Begin("##holoroll_untitled", nullptr,
-                   ImGuiWindowFlags_NoTitleBar |
-                   ImGuiWindowFlags_NoResize |
-                   ImGuiWindowFlags_NoMove |
-                   ImGuiWindowFlags_NoScrollbar |
-                   ImGuiWindowFlags_NoSavedSettings |
-                   ImGuiWindowFlags_NoInputs |
-                   ImGuiWindowFlags_AlwaysAutoResize);
-      ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "%s", msg);
-      ImGui::End();
-
-      // Drop-zone visual feedback (drawn even in Untitled state because
-      // we register the drop target whenever the viewport is open).
-      DrawDropOverlayImGui(drop_target::GetDragState());
-
-      ImGui::Render();
-      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    }
-
-    SwapBuffers(hdc_);
-    return;
-  }
+  // v0.12.0-alpha.14: previously this branch rendered a centered
+  // "Save the REAPER project to enable HoloRoll" message and bailed
+  // out of the full scene. Lifted in alpha.14 — the plugin now works
+  // on Untitled projects too, with animations stored in a per-user
+  // default folder (see ResolveActiveAnimationsFolder + the
+  // `default_animations_folder` config key). status.projectUntitled
+  // still gets computed for any callers who want to know the state
+  // (e.g. for the overlay's info banner), but it no longer blocks
+  // rendering.
 
   const float aspect = static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_);
   const float fovYDeg = 55.0f;
