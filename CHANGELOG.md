@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0-alpha.1] — 2026-05-08
+
+Plugin starts auto-updating itself from GitHub Releases. New versions
+land silently the next time the user closes REAPER — no manual
+download, no dialogs interrupting work.
+
+### Added
+- **In-app auto-updater** (`src/extension/updater.{h,cpp}`). On plugin
+  load, a background worker thread:
+  1. WinHTTP `GET https://api.github.com/repos/Ilia-Smelkov/HoloRoll/releases/latest`.
+  2. Parses the JSON, finds the `HoloRoll-Setup-*.exe` asset, compares
+     its tag to `HOLOROLL_VERSION_STRING` (compiled into the DLL).
+  3. If newer: streams the installer into
+     `%APPDATA%\REAPER\UserPlugins\HoloRollUpdates\` and persists
+     pointer + version in the config.
+  Worker then exits. State is queried lock-free by the UI banner.
+- **Update banner** at the top of the overlay window:
+  `Update available: <installed> -> <available>` plus a status line
+  ("Will install silently when you close REAPER.") and a
+  `[Dismiss for this version]` button. Banner hides immediately on
+  dismiss and won't reappear until a NEWER release is published.
+- **Silent install on REAPER close**: when the plugin is being
+  unloaded (`Stop()` path), if there's a ready installer and the
+  user hasn't disabled `update.auto_install_on_close`, we spawn a
+  detached PowerShell watchdog:
+  ```
+  Start-Sleep -Seconds 2
+  while reaper.exe still running (max 120s) sleep 500ms
+  Start-Process <installer> /VERYSILENT /SUPPRESSMSGBOXES /NORESTART -Wait
+  ```
+  The DLL gets unloaded a moment later, REAPER closes, watchdog
+  sees `reaper.exe` gone, installer fires silently. Next REAPER
+  start = new HoloRoll. No user action between detect and install
+  beyond "close REAPER like you normally would".
+- **`HOLOROLL_VERSION_STRING`** constant in
+  `src/extension/version.h` — single source of truth for the
+  currently-built version. Must be bumped manually when tagging
+  new releases.
+- **SemVer-ish version comparator** in `updater.cpp` that handles
+  `MAJOR.MINOR.PATCH[-pre.N]` correctly: any pre-release sorts
+  below the clean release of the same x.y.z; numeric pre-release
+  components compare numerically.
+
+### Added — config keys
+- `update.enabled` (default `1`) — master toggle. `0` disables the
+  background poll entirely.
+- `update.auto_install_on_close` (default `1`) — when `0`, the
+  watchdog isn't spawned even if there's a pending installer.
+  Status text in the banner switches to "Auto-install disabled;
+  run the installer manually."
+- `update.pending_installer_path`, `update.pending_version`,
+  `update.dismissed_version`, `update.last_check_unix` — internal
+  state, persisted so the banner can re-appear immediately on the
+  next plugin load without waiting for a network round-trip.
+
+### Added — CMake
+- New source `src/extension/updater.cpp` compiled into the plugin.
+- New link library `winhttp` (Windows ships it; nothing to install).
+
+### Threading model
+- The worker thread is created in `Start()` and `join()`-ed in
+  `Stop()` — no detached threads holding REAPER state hostage.
+- The watchdog is the only detached process; it lives independently
+  of our DLL and outlives it intentionally.
+- All getters (`HasReadyUpdate`, `AvailableVersion`, etc.) take a
+  short lock and return — safe to call every render frame.
+
+### Known limitations / follow-ups
+- **Polling fires once per plugin load**, not on a periodic timer.
+  Means: if you leave REAPER open for days, you won't see new
+  releases until the next start. Adequate for alpha; will revisit
+  with `update.check_interval_hours` if it bites.
+- **No prerelease channel toggle.** The current release.yml tags
+  alphas as `prerelease: false`, so `/releases/latest` returns them
+  too. When we go stable, alphas should be marked as prerelease and
+  the updater needs a channel switch (`update.channel = stable |
+  prerelease | both`).
+- **`HOLOROLL_VERSION_STRING` is hand-edited.** Easy to forget.
+  Long-term fix is injection from CMake via `git describe --tags`
+  but that needs git available at build time, which is true on CI
+  but might not be locally. Deferred.
+- **PowerShell required.** Ships with Windows but some hardened
+  environments lock it down. If we hit that, fallback would be
+  shipping our own tiny watchdog `.exe`.
+- **Antivirus may flag** a downloaded `.exe` being executed
+  detached from a "plugin". Code-signing the installer would
+  reduce friction; not done yet.
+- **No retry on failed download.** If the network drops mid-
+  download, the partial file is deleted and we wait for the next
+  plugin load. No exponential backoff or progress UI.
+
+### Migration
+- First time the plugin loads with this version, it will hit
+  GitHub once. Users on offline machines see one log line
+  ("no network or GitHub unreachable; will retry on next plugin
+  start.") in the debug log and nothing else — no banner, no
+  background activity.
+- Set `update.enabled=0` in `holoroll_config.ini` to opt out
+  entirely. Set `update.auto_install_on_close=0` to keep checking
+  but never auto-install (banner becomes informational only).
+
+
 ## [0.12.0-alpha.15] — 2026-05-08
 
 Socket bridge gets four more verbs to make external scripts feel
@@ -1555,7 +1657,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.12.0-alpha.15...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.13.0-alpha.1...HEAD
+[0.13.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.1
 [0.12.0-alpha.15]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.15
 [0.12.0-alpha.14]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.14
 [0.12.0-alpha.13]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.13

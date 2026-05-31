@@ -13,6 +13,7 @@
 #include "core/animation_library.h"
 #include "core/motion_events.h"
 #include "extension/socket_server.h"
+#include "extension/updater.h"
 #include "core/config_store.h"
 #include "core/folder_watcher.h"
 #include "core/viewport_poses.h"
@@ -111,6 +112,13 @@ constexpr char kCfgKeyDebugEnabled[]           = "debug.enabled";
 // chain after the project-level override and the project-relative
 // folder. Default location is created lazily on first use.
 constexpr char kCfgKeyDefaultAnimationsFolder[] = "default_animations_folder";
+
+// v0.13.0-alpha.1: in-app auto-updater persistence. See
+// src/extension/updater.cpp for what each key means; entry.cpp only
+// seeds defaults via EnsureConfigDefaults and exposes the config store
+// to updater via holoroll_config_ref().
+constexpr char kCfgKeyUpdateEnabled[]            = "update.enabled";
+constexpr char kCfgKeyUpdateAutoInstallOnClose[] = "update.auto_install_on_close";
 
 // Default subfolder name for project-relative animations storage. Convention
 // matches game-industry layouts (Animations/ alongside Audio/, Materials/,
@@ -247,6 +255,11 @@ void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeyDefaultAnimationsFolder)) {
     g_config.SetString(kCfgKeyDefaultAnimationsFolder, std::string{});
   }
+  // v0.13.0-alpha.1: auto-updater defaults — both ON. Users can
+  // opt out of network checks via update.enabled=0, or of automatic
+  // install via update.auto_install_on_close=0.
+  if (!g_config.Has(kCfgKeyUpdateEnabled))            g_config.SetDouble(kCfgKeyUpdateEnabled, 1.0);
+  if (!g_config.Has(kCfgKeyUpdateAutoInstallOnClose)) g_config.SetDouble(kCfgKeyUpdateAutoInstallOnClose, 1.0);
 }
 
 // Read the configured region-name prefix and apply it to the AnimationLibrary
@@ -2202,6 +2215,10 @@ void OnTimer() {
   // the UI lifecycle.
   socket_server::Tick();
 
+  // v0.13.0-alpha.1: pump the updater. Currently a no-op; placeholder
+  // for future periodic re-check / progress UI.
+  updater::Tick();
+
   if (!g_viewport.IsOpen()) return;
 
   // v0.7.0: detect REAPER project changes (open / save-as / switch / close).
@@ -2391,6 +2408,12 @@ const ReaperApi& holoroll_bridge_api() {
 void holoroll_bridge_log(const std::string& msg) {
   ConsoleLog(msg);
 }
+// v0.13.0-alpha.1: updater module needs read/write access to the
+// shared config store. Anonymous-ns instance + file-scope forwarder
+// = same pattern as the bridge accessors above.
+ConfigStore& holoroll_config_ref() {
+  return g_config;
+}
 
 extern "C" {
 REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hInstance, reaper_plugin_info_t* rec) {
@@ -2409,6 +2432,11 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
     // v0.12.0-alpha.11: stop the socket bridge before any other cleanup
     // so worker thread can't queue new requests against teardowned state.
     socket_server::Stop();
+    // v0.13.0-alpha.1: stop the updater. If a pending installer is
+    // staged + auto-install enabled + not dismissed, this is where
+    // the detached PowerShell watchdog gets spawned. Must run before
+    // bridge shutdown so config save (if any) completes.
+    updater::Stop();
     CloseViewportIfNeeded();
     g_watcher.Stop();
     g_incomingWatcher.Stop();
@@ -2516,6 +2544,12 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
   // Failure to start (port busy, etc.) is non-fatal — logged and
   // continues without the bridge.
   socket_server::Start();
+
+  // v0.13.0-alpha.1: in-app auto-updater. Background polls GitHub
+  // Releases on a worker thread; on REAPER close (Stop below) it
+  // spawns the detached PowerShell watchdog that runs the staged
+  // installer silently after our DLL is unloaded.
+  updater::Start();
 
   return 1;
 }

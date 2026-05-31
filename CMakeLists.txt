@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(reaper_holoroll VERSION 0.12.0 LANGUAGES CXX)
+project(reaper_holoroll VERSION 0.13.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,6 +43,7 @@ add_library(reaper_holoroll SHARED
   src/extension/folder_picker.cpp
   src/extension/drop_target.cpp
   src/extension/socket_server.cpp
+  src/extension/updater.cpp
   src/core/mdd_data_manager.cpp
   src/core/obj_index_loader.cpp
   src/core/animation_library.cpp
@@ -87,6 +88,8 @@ target_link_libraries(reaper_holoroll PRIVATE
   oleaut32
   # v0.12.0-alpha.11: TCP socket bridge.
   ws2_32
+  # v0.13.0-alpha.1: in-app auto-updater (WinHTTP for GitHub Releases API).
+  winhttp
 )
 
 if(MSVC)

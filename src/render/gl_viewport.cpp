@@ -7,6 +7,8 @@
 #include <gl/GL.h>
 
 #include "extension/drop_target.h"
+#include "extension/updater.h"
+#include "extension/version.h"
 #include "imgui.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "backends/imgui_impl_win32.h"
@@ -893,6 +895,29 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
 
   ImGui::SetNextWindowBgAlpha(0.85f);
   ImGui::Begin("HoloRoll", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+
+  // v0.13.0-alpha.1: auto-update banner. Shows at the top of the
+  // overlay window when the updater has a ready installer staged
+  // and the user hasn't dismissed this version. "Dismiss" hides the
+  // banner until the next NEWER release arrives — the staged
+  // installer stays on disk (auto-install on close still won't fire
+  // for this version because the dismissed-version config key
+  // disables it). Non-blocking; placement, playback, scene
+  // controls all work normally underneath.
+  if (updater::HasReadyUpdate()) {
+    const std::string available = updater::AvailableVersion();
+    const std::string status = updater::StatusText();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.95f, 0.65f, 1.0f));
+    ImGui::TextWrapped("Update available: %s -> %s", HOLOROLL_VERSION_STRING, available.c_str());
+    ImGui::PopStyleColor();
+    if (!status.empty()) {
+      ImGui::TextWrapped("%s", status.c_str());
+    }
+    if (ImGui::SmallButton("Dismiss for this version")) {
+      updater::DismissCurrentVersion();
+    }
+    ImGui::Separator();
+  }
 
   if (ImGui::CollapsingHeader("Library", ImGuiTreeNodeFlags_DefaultOpen)) {
     // alpha.14: no more Untitled-project gate here. The folder shown
