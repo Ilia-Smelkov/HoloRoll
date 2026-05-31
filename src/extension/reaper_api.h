@@ -161,9 +161,11 @@ using AddRemoveReaScriptFn     = int (*)(bool isAdd, int sectionID,
 // register_action returns a string named command id (e.g. "_RS1234abcd")
 // — that's what ReverseNamedCommandLookup is for. script_shortcut /
 // assign_shortcut work against the main keyboard section, which we
-// obtain via SectionFromUniqueID(0). KbdSectionInfo is opaque to us;
-// we never dereference it, just pass the pointer through.
-class KbdSectionInfo;
+// obtain via SectionFromUniqueID(0). KbdSectionInfo comes from
+// reaper_plugin.h (already included above) — it's a typedef for a
+// struct, so a `class` forward-declaration here would clash with the
+// SDK's definition (LNK2371 in MSVC). We rely on the include and just
+// reference the type directly.
 using ReverseNamedCommandLookupFn = const char* (*)(int command_id);
 using NamedCommandLookupFn        = int (*)(const char* command_name);
 using GetCursorPositionFn         = double (*)();
