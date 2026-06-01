@@ -2483,6 +2483,14 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
   const double gap       = args.value("gap", 0.0);
   const std::string startMode = args.value("start_mode", std::string("after_last"));
   const bool clearExisting    = args.value("clear_existing", false);
+  // v0.13.0-alpha.5: per-unit polling budget. Items can take a moment
+  // to "land" on the timeline — REAPER's internal item table updates
+  // are normally synchronous, but with PreventUIRefresh active +
+  // motion-envelope writes happening alongside, the caller has
+  // observed item geometry occasionally not being readable on the
+  // very next API call. Default 2.0s is generous; callers can bump
+  // or lower per their workload.
+  const double itemWaitS = args.value("item_wait_s", 2.0);
 
   // Step 1: starting position. Per spec: compute BEFORE clearing, so
   // start_mode=after_last + clear_existing=true still anchors to where
@@ -2549,28 +2557,84 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
       continue;
     }
 
+    // Snapshot the track's item count BEFORE creation so we can detect
+    // the new item appearing via enumeration (covers callers who suspect
+    // CreateNamedItemWithRolls's pointer might point at an item that's
+    // not yet enumerable through CountTrackMediaItems/GetTrackMediaItem).
+    const int beforeCount =
+        api.countTrackMediaItems ? api.countTrackMediaItems(loc.track) : -1;
+
     // Place the item. Item NAME = anim basename so HoloRoll's playback
     // resolution can match it back to the animation. The region's
     // name (which can be anything the caller chose) is set on the
     // marker below, NOT on the item.
-    MediaItem* item = CreateNamedItemWithRolls(loc.track, pos, duration,
-                                                0.0f, 0.0f, anim);
-    if (!item) {
-      skipped.push_back({{"anim", anim}, {"reason", "item creation failed"}});
-      continue;
-    }
+    MediaItem* itemPtr = CreateNamedItemWithRolls(loc.track, pos, duration,
+                                                   0.0f, 0.0f, anim);
 
     // Write motion envelopes alongside the item, same as PlaceOurItemsAndRegions.
-    if (loc.fxIdx >= 0) {
+    // Done BEFORE polling because envelope writes are sync and we want them
+    // to be part of the same "item is now ready" state.
+    if (itemPtr && loc.fxIdx >= 0) {
       WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
     }
 
-    // Read the ACTUAL position/length back from the placed item. The
-    // user explicitly wanted region geometry anchored to the item
-    // REAPER ended up creating, not the values we asked for — so we
+    // v0.13.0-alpha.5: poll until the new item is actually visible on
+    // the timeline. Two-step confirmation:
+    //   (a) CountTrackMediaItems must have incremented (REAPER's item
+    //       table has registered the addition);
+    //   (b) the item must be findable by name == anim on the track.
+    // If multiple items share the name, prefer the one matching
+    // itemPtr (the one CreateNamedItemWithRolls just returned). Polls
+    // run with 75ms granularity — fine-grained enough to feel
+    // instant, coarse enough not to peg CPU.
+    MediaItem* discovered = nullptr;
+    if (api.countTrackMediaItems && api.getTrackMediaItem) {
+      const DWORD startTick = GetTickCount();
+      const DWORD budgetMs = static_cast<DWORD>(itemWaitS * 1000.0);
+      while (true) {
+        const int nowCount = api.countTrackMediaItems(loc.track);
+        if (beforeCount < 0 || nowCount > beforeCount) {
+          MediaItem* nameMatch = nullptr;
+          for (int i = 0; i < nowCount; ++i) {
+            MediaItem* it = api.getTrackMediaItem(loc.track, i);
+            if (!it) continue;
+            if (ReadItemName(it) != anim) continue;
+            // Exact pointer match wins outright (handles duplicates).
+            if (itemPtr && it == itemPtr) {
+              nameMatch = it;
+              break;
+            }
+            // No pointer match yet — remember the most recent name
+            // match so we can fall back if needed.
+            nameMatch = it;
+          }
+          if (nameMatch) { discovered = nameMatch; break; }
+        }
+        // Timeout?
+        if (GetTickCount() - startTick >= budgetMs) break;
+        Sleep(75);
+      }
+    } else if (itemPtr) {
+      // No enumeration APIs to poll with — trust the pointer.
+      discovered = itemPtr;
+    }
+
+    if (!discovered) {
+      skipped.push_back({
+          {"anim", anim},
+          {"reason", "item did not appear on timeline within item_wait_s seconds"},
+      });
+      // Do NOT advance pos: the slot stays free for the next unit so
+      // we don't end up with a missing-item gap in the sequence.
+      continue;
+    }
+
+    // Read the ACTUAL position/length back from the discovered item.
+    // The user explicitly wanted region geometry anchored to the item
+    // REAPER ended up placing, not the values we asked for — so we
     // re-query rather than reusing pos/duration.
-    const double ip = api.getMediaItemInfo_Value(item, "D_POSITION");
-    const double il = api.getMediaItemInfo_Value(item, "D_LENGTH");
+    const double ip = api.getMediaItemInfo_Value(discovered, "D_POSITION");
+    const double il = api.getMediaItemInfo_Value(discovered, "D_LENGTH");
 
     const double regionStart = ip;
     const double regionEnd   = ip + il + regionPad;

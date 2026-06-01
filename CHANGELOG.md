@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0-alpha.1] — 2026-05-08
+
+Start of the 0.14.0 cycle. Single feature this release:
+`build_regions` now polls REAPER's item table until each new item is
+visibly on the timeline before reading its geometry. One verb call =
+"placed, observed, wrapped" (or honestly skipped); no more silent
+race where the region lands at the requested-but-not-final position.
+
+### Added — new arg
+- **`item_wait_s`** (default `2.0`) — per-unit polling budget in
+  seconds. For each unit we:
+  1. Snapshot `CountTrackMediaItems(track)` BEFORE creation.
+  2. Call `CreateNamedItemWithRolls(...)`.
+  3. Write motion envelopes (sync).
+  4. Poll every 75 ms until BOTH
+     - `CountTrackMediaItems` has incremented, AND
+     - an item with `name == anim` is findable on the track
+       (pointer match preferred when duplicates exist).
+  5. Once found, read `D_POSITION` / `D_LENGTH` off THAT item and
+     build the region.
+- If the budget expires without the item showing up, the unit lands
+  in `skipped` with reason
+  `"item did not appear on timeline within item_wait_s seconds"`,
+  the region is NOT created, and `pos` does NOT advance — the next
+  unit gets the same slot, no gap in the sequence.
+
+### Why
+- Caller reported regions occasionally drifting away from where the
+  item actually landed. Root cause hypothesis (per their spec):
+  REAPER's item-table updates can lag a tick or two behind the
+  `AddMediaItemToTrack` return, especially with `PreventUIRefresh`
+  active and motion-envelope writes happening in the same critical
+  section. Polling closes the race.
+- Spec is explicit that this must happen inside a SINGLE
+  `build_regions` call — retrying from the caller side would
+  double-place items and leave orphan regions.
+
+### Failure modes preserved
+- `CreateNamedItemWithRolls` returning null is no longer surfaced as
+  a separate skip reason — null pointer just means polling falls
+  back to enumeration-by-name. If neither path finds an item within
+  the budget, the timeout reason fires instead.
+- If `CountTrackMediaItems` / `GetTrackMediaItem` aren't available
+  in the resolved API (very old REAPER), we trust the pointer
+  from `CreateNamedItemWithRolls` and skip the poll. Best effort
+  for ancient builds.
+
+
 ## [0.13.0-alpha.4] — 2026-05-08
 
 CI was silently mis-tagging every alpha release. Fixed, plus the
@@ -1835,7 +1883,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.13.0-alpha.4...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.1...HEAD
+[0.14.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.1
 [0.13.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.4
 [0.13.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.3
 [0.13.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.2
