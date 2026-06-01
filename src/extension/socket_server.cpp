@@ -59,6 +59,11 @@
 // entry.cpp; their declarations:
 extern const ReaperApi& holoroll_bridge_api();
 extern void holoroll_bridge_log(const std::string& msg);
+// v0.13.0-alpha.3: build_regions implementation lives in entry.cpp
+// (it needs the placement internals that aren't exposed individually).
+// Returns the same JSON shape we surface to the caller — or a single
+// "_error" field that HandleBuildRegions unpacks into a VerbError.
+extern nlohmann::json holoroll_build_regions(const nlohmann::json& args);
 
 namespace {
 
@@ -379,6 +384,18 @@ json HandleAssignShortcut(const json& args) {
   return json{{"opened", true}};
 }
 
+// v0.13.0-alpha.3: item-anchored region builder. Implementation lives
+// in entry.cpp because every placement primitive it needs is already
+// there; we just unpack the spec-defined `_error` convention into a
+// VerbError so error replies look the same as every other verb's.
+json HandleBuildRegions(const json& args) {
+  json result = holoroll_build_regions(args);
+  if (result.is_object() && result.contains("_error")) {
+    throw VerbError(result["_error"].get<std::string>());
+  }
+  return result;
+}
+
 json HandleGetCursor(const json& /*args*/) {
   const auto& api = g_bridge.Api();
   // Prefer the non-Ex form (no project arg, always current project) —
@@ -411,6 +428,8 @@ std::string DispatchVerb(const std::string& method, const json& args) {
     else if (method == "script_shortcut")  result = HandleScriptShortcut(args);
     else if (method == "assign_shortcut")  result = HandleAssignShortcut(args);
     else if (method == "get_cursor")       result = HandleGetCursor(args);
+    // v0.13.0-alpha.3:
+    else if (method == "build_regions")    result = HandleBuildRegions(args);
     else throw VerbError("unknown_method: " + method);
 
     return json{{"ok", true}, {"result", result}}.dump();

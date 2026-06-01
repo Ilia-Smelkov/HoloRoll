@@ -14,6 +14,12 @@
 #include "core/motion_events.h"
 #include "extension/socket_server.h"
 #include "extension/updater.h"
+
+// v0.13.0-alpha.3: build_regions verb's payload is JSON-shaped, easier
+// to keep the implementation here (where all placement internals live)
+// than to surface a dozen shims through socket_server. json.hpp is
+// already on the include path through tinygltf — no extra dependency.
+#include "json.hpp"
 #include "core/config_store.h"
 #include "core/folder_watcher.h"
 #include "core/viewport_poses.h"
@@ -798,6 +804,34 @@ void DeleteOurRegions() {
   }
   for (const int id : toDelete) {
     api.deleteProjectMarker(nullptr, id, true);
+  }
+}
+
+// v0.13.0-alpha.3: wipe ALL regions (not just HoloRoll-coloured ones).
+// Used by the build_regions socket verb when clear_existing=true. The
+// external app explicitly asked for a clean slate; we honour that
+// without filtering by colour/prefix. Markers (isrgn=false) are
+// untouched — only regions are deleted.
+void DeleteAllRegions() {
+  const auto& api = g_bridge.Api();
+  if (!api.enumProjectMarkers3 || !api.deleteProjectMarker) return;
+
+  std::vector<int> toDelete;
+  int idx = 0;
+  while (true) {
+    bool isrgn = false;
+    double pos = 0.0, rgnend = 0.0;
+    const char* name = nullptr;
+    int markrgnindexnumber = 0;
+    int color = 0;
+    const int next = api.enumProjectMarkers3(nullptr, idx, &isrgn, &pos, &rgnend,
+                                              &name, &markrgnindexnumber, &color);
+    if (next == 0) break;
+    if (isrgn) toDelete.push_back(markrgnindexnumber);
+    idx = next;
+  }
+  for (const int id : toDelete) {
+    api.deleteProjectMarker(nullptr, id, /*isrgn=*/true);
   }
 }
 
@@ -2413,6 +2447,154 @@ void holoroll_bridge_log(const std::string& msg) {
 // = same pattern as the bridge accessors above.
 ConfigStore& holoroll_config_ref() {
   return g_config;
+}
+
+// v0.13.0-alpha.3: implementation of the build_regions socket verb.
+// Item-anchored: for every unit we place the media item first, read
+// its actual position/length back from REAPER, then build the region
+// around THAT geometry. Spec source: socket bridge verb description
+// in CHANGELOG.md.
+//
+// On top-level argument errors (missing/malformed `units`, etc.) the
+// returned JSON has a single `_error` field — socket_server unpacks
+// that and throws VerbError. Per-unit failures (missing animation,
+// zero-length anim, item-create returning null) are normal: they
+// land in the `skipped` array with a human-readable reason.
+//
+// Lives at file scope so unqualified name lookup finds all the
+// anon-ns symbols above (g_bridge, g_lib, EnsureItemsTrackAndFx,
+// CreateNamedItemWithRolls, WriteMotionEnvelopesForItem, GetFps,
+// FindLastRegionEnd, DeleteAllRegions).
+nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
+  const auto& api = g_bridge.Api();
+
+  auto errReply = [](const std::string& msg) {
+    return nlohmann::json{{"_error", msg}};
+  };
+
+  if (!api.addProjectMarker2 || !api.getMediaItemInfo_Value) {
+    return errReply("required REAPER APIs unavailable");
+  }
+  if (!args.contains("units") || !args["units"].is_array()) {
+    return errReply("missing or invalid 'units' (expected array)");
+  }
+
+  const double regionPad = args.value("region_pad", 0.0);
+  const double gap       = args.value("gap", 0.0);
+  const std::string startMode = args.value("start_mode", std::string("after_last"));
+  const bool clearExisting    = args.value("clear_existing", false);
+
+  // Step 1: starting position. Per spec: compute BEFORE clearing, so
+  // start_mode=after_last + clear_existing=true still anchors to where
+  // the (now-deleted) regions used to end. Niche but well-defined.
+  double pos = 0.0;
+  if (startMode == "cursor") {
+    if (api.getCursorPosition) pos = api.getCursorPosition();
+    else if (api.getCursorPositionEx) pos = api.getCursorPositionEx(nullptr);
+  } else {
+    // Default = "after_last". Unknown values fall through here too —
+    // safer than rejecting on an arbitrary string the caller may
+    // mistype.
+    pos = FindLastRegionEnd();
+  }
+
+  // One big undo block for the whole batch + suppress UI refresh
+  // between items. Same wrapping the existing create_regions verb
+  // uses; the spec emphasises atomicity-per-item but a single outer
+  // block is the natural granularity for an undo entry the user
+  // sees in REAPER's history.
+  if (api.undo_BeginBlock)  api.undo_BeginBlock();
+  if (api.preventUIRefresh) api.preventUIRefresh(1);
+
+  // Step 2: clear regions if requested.
+  if (clearExisting) DeleteAllRegions();
+
+  // Ensure items track + JSFX up front so we don't re-resolve it on
+  // every iteration.
+  MotionFxLocation loc = EnsureItemsTrackAndFx();
+  if (!loc.track) {
+    if (api.preventUIRefresh) api.preventUIRefresh(-1);
+    if (api.undo_EndBlock)    api.undo_EndBlock("HoloRoll bridge: build_regions", -1);
+    return errReply("could not create or find items track");
+  }
+  const double fps = GetFps();
+
+  nlohmann::json created = nlohmann::json::array();
+  nlohmann::json skipped = nlohmann::json::array();
+
+  for (const auto& unit : args["units"]) {
+    if (!unit.is_object()) {
+      skipped.push_back({{"anim", ""}, {"reason", "unit is not an object"}});
+      continue;
+    }
+    const std::string anim = unit.value("anim", std::string{});
+    const std::string regionName = unit.value("name", std::string{});
+    if (anim.empty()) {
+      skipped.push_back({{"anim", anim}, {"reason", "empty 'anim'"}});
+      continue;
+    }
+
+    // Resolve animation by name. ResolveAnimationByItemName mirrors the
+    // exact behaviour we use during playback so callers don't need to
+    // care about variation-suffix stripping.
+    const std::size_t idx = g_lib.ResolveAnimationByItemName(anim);
+    if (idx == std::numeric_limits<std::size_t>::max()) {
+      skipped.push_back({{"anim", anim}, {"reason", "animation not found in library"}});
+      continue;
+    }
+    const LoadedAnimation& animObj = g_lib.At(idx);
+    const double duration = animObj.DurationSeconds(fps);
+    if (duration <= 0.0) {
+      skipped.push_back({{"anim", anim}, {"reason", "zero-duration animation"}});
+      continue;
+    }
+
+    // Place the item. Item NAME = anim basename so HoloRoll's playback
+    // resolution can match it back to the animation. The region's
+    // name (which can be anything the caller chose) is set on the
+    // marker below, NOT on the item.
+    MediaItem* item = CreateNamedItemWithRolls(loc.track, pos, duration,
+                                                0.0f, 0.0f, anim);
+    if (!item) {
+      skipped.push_back({{"anim", anim}, {"reason", "item creation failed"}});
+      continue;
+    }
+
+    // Write motion envelopes alongside the item, same as PlaceOurItemsAndRegions.
+    if (loc.fxIdx >= 0) {
+      WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
+    }
+
+    // Read the ACTUAL position/length back from the placed item. The
+    // user explicitly wanted region geometry anchored to the item
+    // REAPER ended up creating, not the values we asked for — so we
+    // re-query rather than reusing pos/duration.
+    const double ip = api.getMediaItemInfo_Value(item, "D_POSITION");
+    const double il = api.getMediaItemInfo_Value(item, "D_LENGTH");
+
+    const double regionStart = ip;
+    const double regionEnd   = ip + il + regionPad;
+    api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
+                          regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
+
+    created.push_back({
+        {"name",  regionName},
+        {"start", regionStart},
+        {"end",   regionEnd},
+    });
+
+    pos = regionEnd + gap;  // next item starts after this region + gap
+  }
+
+  if (api.preventUIRefresh) api.preventUIRefresh(-1);
+  if (api.updateArrange)    api.updateArrange();
+  if (api.undo_EndBlock)    api.undo_EndBlock("HoloRoll bridge: build_regions", -1);
+
+  return nlohmann::json{
+      {"created", created},
+      {"skipped", skipped},
+      {"count",   static_cast<int>(created.size())},
+  };
 }
 
 extern "C" {

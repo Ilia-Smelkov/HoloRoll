@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0-alpha.3] — 2026-05-08
+
+New socket verb `build_regions`. Item-anchored region creation:
+caller hands us a list of `{anim, name}` pairs, we place each item
+using the existing animation→media mapping, then build the region
+around the item's ACTUAL position and length — not the values we
+asked for. Geometry sticks to real items.
+
+### Added — new bridge verb
+- **`build_regions`** — args:
+  ```
+  { "units": [ {"anim":"...", "name":"..."}, ... ],
+    "region_pad": <float>,
+    "gap": <float>,
+    "start_mode": "after_last" | "cursor",
+    "clear_existing": <bool> }
+  ```
+  Returns:
+  ```
+  { "created": [ {"name","start","end"}, ... ],
+    "skipped": [ {"anim","reason"}, ... ],
+    "count": <int> }
+  ```
+  Logic:
+  1. Starting `pos` = `GetCursorPosition()` if `start_mode="cursor"`,
+     else end of last region across the project (0 if none). Computed
+     BEFORE the clear step.
+  2. If `clear_existing`: wipe ALL regions (`DeleteAllRegions`).
+     Markers are untouched.
+  3. For each unit in order:
+     - resolve animation by name via the same path playback uses
+       (`ResolveAnimationByItemName` — handles variation suffixes);
+     - place the media item at `pos` (same logic as the overlay
+       Place all button: track find-or-create + `CreateNamedItemWith
+       Rolls` + motion envelope write);
+     - if the item doesn't get created, record `{anim, reason}` in
+       skipped and continue — NO region for this unit;
+     - read `D_POSITION` and `D_LENGTH` back from REAPER, build the
+       region around those values + `region_pad`;
+     - `pos = ip + il + region_pad + gap`.
+  4. Whole batch wrapped in `Undo_BeginBlock` / `PreventUIRefresh`
+     so it lands as one undo entry and doesn't re-paint between
+     items.
+
+### Internal
+- New `nlohmann::json holoroll_build_regions(const nlohmann::json&)`
+  at file scope in `entry.cpp`. Lives there because the
+  implementation needs `g_lib`, `EnsureItemsTrackAndFx`,
+  `CreateNamedItemWithRolls`, `WriteMotionEnvelopesForItem`,
+  `FindLastRegionEnd`, `GetFps`, `DeleteAllRegions` — all in
+  entry.cpp's anonymous namespace. Surfacing each through a shim
+  would be more code than just including `json.hpp` and writing
+  the verb here.
+- `socket_server.cpp` declares the function via `extern` and
+  forwards. The error convention is a top-level `_error` field in
+  the returned JSON; `HandleBuildRegions` unpacks it into a
+  `VerbError` so error replies match every other verb's shape.
+- New helper `DeleteAllRegions()` in `entry.cpp`'s anon namespace.
+  Counterpart to `DeleteOurRegions()`, but doesn't filter by
+  colour/prefix.
+
+### Design notes
+- **Region pad is geometry, not buffer.** It extends the region past
+  the item end by exactly `region_pad` seconds — useful for tails
+  or hover-zones. Pre/post-roll playback buffers (from alpha.11.x)
+  are a SEPARATE feature; they don't affect what `build_regions`
+  produces.
+- **Per-unit failure is non-fatal.** Skipping a bad anim doesn't
+  abort the batch. The caller gets back exactly which units failed
+  and why, and the surviving items are already placed.
+- **Item name == anim basename.** Region name is whatever the
+  caller chose. The two are decoupled on purpose: item-name has to
+  match HoloRoll's playback resolution; region-name is free-form
+  user-facing text.
+
+### Deprecation note
+- The earlier `create_regions` verb (alpha.11) is **no longer the
+  recommended path** for region creation tied to item geometry —
+  use `build_regions` instead. `create_regions` stays in place
+  for the explicit `{start, end}` use case (raw region marker
+  insertion without any item).
+
+
 ## [0.13.0-alpha.2] — 2026-05-08
 
 Auto-updater gets the two missing pieces from alpha.1: periodic
@@ -1697,7 +1780,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.13.0-alpha.2...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.13.0-alpha.3...HEAD
+[0.13.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.3
 [0.13.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.2
 [0.13.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.1
 [0.12.0-alpha.15]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.12.0-alpha.15
