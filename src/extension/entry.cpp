@@ -2495,6 +2495,10 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
   // Step 1: starting position. Per spec: compute BEFORE clearing, so
   // start_mode=after_last + clear_existing=true still anchors to where
   // the (now-deleted) regions used to end. Niche but well-defined.
+  //
+  // alpha.2 fix #1: after_last now adds `gap` as a lead-gap from the
+  // last region's end. Otherwise the first new region would butt
+  // directly against the last existing one.
   double pos = 0.0;
   if (startMode == "cursor") {
     if (api.getCursorPosition) pos = api.getCursorPosition();
@@ -2503,7 +2507,7 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
     // Default = "after_last". Unknown values fall through here too —
     // safer than rejecting on an arbitrary string the caller may
     // mistype.
-    pos = FindLastRegionEnd();
+    pos = FindLastRegionEnd() + gap;
   }
 
   // One big undo block for the whole batch + suppress UI refresh
@@ -2536,90 +2540,57 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
       continue;
     }
     const std::string anim = unit.value("anim", std::string{});
-    const std::string regionName = unit.value("name", std::string{});
+    const std::string regionBase = unit.value("name", std::string{});
+    int variations = unit.value("variations", 1);
+    if (variations < 1) variations = 1;
     if (anim.empty()) {
       skipped.push_back({{"anim", anim}, {"reason", "empty 'anim'"}});
       continue;
     }
 
-    // Resolve animation by name. ResolveAnimationByItemName mirrors the
-    // exact behaviour we use during playback so callers don't need to
-    // care about variation-suffix stripping.
-    const std::size_t idx = g_lib.ResolveAnimationByItemName(anim);
-    if (idx == std::numeric_limits<std::size_t>::max()) {
+    // Resolve animation in our library — we need the LoadedAnimation
+    // object to rewrite motion envelopes after the reposition and on
+    // every duplicate variation.
+    const std::size_t animIdx = g_lib.ResolveAnimationByItemName(anim);
+    if (animIdx == std::numeric_limits<std::size_t>::max()) {
       skipped.push_back({{"anim", anim}, {"reason", "animation not found in library"}});
       continue;
     }
-    const LoadedAnimation& animObj = g_lib.At(idx);
-    const double duration = animObj.DurationSeconds(fps);
-    if (duration <= 0.0) {
-      skipped.push_back({{"anim", anim}, {"reason", "zero-duration animation"}});
-      continue;
-    }
+    const LoadedAnimation& animObj = g_lib.At(animIdx);
 
-    // Snapshot the track's item count BEFORE creation so we can detect
-    // the new item appearing via enumeration (covers callers who suspect
-    // CreateNamedItemWithRolls's pointer might point at an item that's
-    // not yet enumerable through CountTrackMediaItems/GetTrackMediaItem).
-    const int beforeCount =
-        api.countTrackMediaItems ? api.countTrackMediaItems(loc.track) : -1;
-
-    // Place the item. Item NAME = anim basename so HoloRoll's playback
-    // resolution can match it back to the animation. The region's
-    // name (which can be anything the caller chose) is set on the
-    // marker below, NOT on the item.
-    MediaItem* itemPtr = CreateNamedItemWithRolls(loc.track, pos, duration,
-                                                   0.0f, 0.0f, anim);
-
-    // Write motion envelopes alongside the item, same as PlaceOurItemsAndRegions.
-    // Done BEFORE polling because envelope writes are sync and we want them
-    // to be part of the same "item is now ready" state.
-    if (itemPtr && loc.fxIdx >= 0) {
-      WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
-    }
-
-    // v0.13.0-alpha.5: poll until the new item is actually visible on
-    // the timeline. Two-step confirmation:
-    //   (a) CountTrackMediaItems must have incremented (REAPER's item
-    //       table has registered the addition);
-    //   (b) the item must be findable by name == anim on the track.
-    // If multiple items share the name, prefer the one matching
-    // itemPtr (the one CreateNamedItemWithRolls just returned). Polls
-    // run with 75ms granularity — fine-grained enough to feel
-    // instant, coarse enough not to peg CPU.
-    MediaItem* discovered = nullptr;
-    if (api.countTrackMediaItems && api.getTrackMediaItem) {
+    // alpha.2 semantics change: build_regions does NOT place the
+    // initial item — the export pipeline does that. We POLL for an
+    // existing item named `anim` to appear on ANY track, then
+    // reposition + wrap it. If nothing shows up within item_wait_s,
+    // skip the unit (no region, no pos advance).
+    MediaItem* discoveredItem = nullptr;
+    MediaTrack* discoveredTrack = nullptr;
+    if (api.countTracks && api.getTrack && api.countTrackMediaItems &&
+        api.getTrackMediaItem) {
       const DWORD startTick = GetTickCount();
       const DWORD budgetMs = static_cast<DWORD>(itemWaitS * 1000.0);
       while (true) {
-        const int nowCount = api.countTrackMediaItems(loc.track);
-        if (beforeCount < 0 || nowCount > beforeCount) {
-          MediaItem* nameMatch = nullptr;
-          for (int i = 0; i < nowCount; ++i) {
-            MediaItem* it = api.getTrackMediaItem(loc.track, i);
+        const int trackCount = api.countTracks(nullptr);
+        for (int t = 0; t < trackCount && !discoveredItem; ++t) {
+          MediaTrack* track = api.getTrack(nullptr, t);
+          if (!track) continue;
+          const int itemCount = api.countTrackMediaItems(track);
+          for (int i = 0; i < itemCount; ++i) {
+            MediaItem* it = api.getTrackMediaItem(track, i);
             if (!it) continue;
             if (ReadItemName(it) != anim) continue;
-            // Exact pointer match wins outright (handles duplicates).
-            if (itemPtr && it == itemPtr) {
-              nameMatch = it;
-              break;
-            }
-            // No pointer match yet — remember the most recent name
-            // match so we can fall back if needed.
-            nameMatch = it;
+            discoveredItem = it;
+            discoveredTrack = track;
+            break;
           }
-          if (nameMatch) { discovered = nameMatch; break; }
         }
-        // Timeout?
+        if (discoveredItem) break;
         if (GetTickCount() - startTick >= budgetMs) break;
         Sleep(75);
       }
-    } else if (itemPtr) {
-      // No enumeration APIs to poll with — trust the pointer.
-      discovered = itemPtr;
     }
 
-    if (!discovered) {
+    if (!discoveredItem) {
       skipped.push_back({
           {"anim", anim},
           {"reason", "item did not appear on timeline within item_wait_s seconds"},
@@ -2629,25 +2600,81 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
       continue;
     }
 
-    // Read the ACTUAL position/length back from the discovered item.
-    // The user explicitly wanted region geometry anchored to the item
-    // REAPER ended up placing, not the values we asked for — so we
-    // re-query rather than reusing pos/duration.
-    const double ip = api.getMediaItemInfo_Value(discovered, "D_POSITION");
-    const double il = api.getMediaItemInfo_Value(discovered, "D_LENGTH");
+    // Item length is queried once — used for the original repositioned
+    // item AND all duplicates. We assume variations share the same
+    // length (which is the case: HoloRoll items carry an animation's
+    // exact duration via CreateNamedItemWithRolls).
+    const double il = api.getMediaItemInfo_Value(discoveredItem, "D_LENGTH");
 
-    const double regionStart = ip;
-    const double regionEnd   = ip + il + regionPad;
-    api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
-                          regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
+    // Reposition the discovered item to current pos. Re-write envelopes
+    // at the new range so they follow the item.
+    if (api.setMediaItemInfo_Value) {
+      api.setMediaItemInfo_Value(discoveredItem, "D_POSITION", pos);
+    }
+    if (loc.fxIdx >= 0) {
+      WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
+    }
 
-    created.push_back({
-        {"name",  regionName},
-        {"start", regionStart},
-        {"end",   regionEnd},
-    });
+    auto formatSuffix = [](int v) {
+      char buf[8];
+      std::snprintf(buf, sizeof(buf), "_%02d", v);
+      return std::string(buf);
+    };
 
-    pos = regionEnd + gap;  // next item starts after this region + gap
+    // Variation 1: wrap the repositioned original item.
+    {
+      const std::string regionName = regionBase + formatSuffix(1);
+      const double regionStart = pos;
+      const double regionEnd   = pos + il + regionPad;
+      api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
+                            regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
+      created.push_back({
+          {"name",  regionName},
+          {"start", regionStart},
+          {"end",   regionEnd},
+      });
+      pos = regionEnd + gap;
+    }
+
+    // Variations 2..N: duplicate the item onto the same track at the
+    // running pos and wrap each one. Item name carries the same _NN
+    // suffix as the region so HoloRoll's variation-aware playback
+    // (`ResolveAnimationByItemName` strips trailing _<digits>) still
+    // resolves them back to the source animation.
+    for (int v = 2; v <= variations; ++v) {
+      const std::string suffix = formatSuffix(v);
+      const std::string itemName = anim + suffix;
+      const std::string regionName = regionBase + suffix;
+
+      // Duplicate = new media item on the SAME track as the original
+      // (preserves whatever placement choice the export made; we don't
+      // force everything onto the HoloRoll items track).
+      MediaItem* dup = CreateNamedItemWithRolls(discoveredTrack, pos, il,
+                                                 0.0f, 0.0f, itemName);
+      if (!dup) {
+        skipped.push_back({
+            {"anim", anim + suffix},
+            {"reason", "duplicate item creation failed"},
+        });
+        // Do NOT advance pos for a failed duplicate.
+        continue;
+      }
+
+      if (loc.fxIdx >= 0) {
+        WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
+      }
+
+      const double regionStart = pos;
+      const double regionEnd   = pos + il + regionPad;
+      api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
+                            regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
+      created.push_back({
+          {"name",  regionName},
+          {"start", regionStart},
+          {"end",   regionEnd},
+      });
+      pos = regionEnd + gap;
+    }
   }
 
   if (api.preventUIRefresh) api.preventUIRefresh(-1);

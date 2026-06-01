@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0-alpha.2] — 2026-05-08
+
+`build_regions` flips its model: items are no longer ours to create —
+the export pipeline is responsible for placement, and `build_regions`
+only **finds**, **repositions**, **wraps**, and **duplicates** for
+variations. This kills the orphan-item class of bugs that came from
+two sides both trying to put the same media item on the timeline.
+
+### Changed — `build_regions` semantics
+
+Old (alpha.1): per unit, call `CreateNamedItemWithRolls` → poll →
+wrap.
+
+New (alpha.2):
+1. Poll up to `item_wait_s` seconds for an item with `name == anim`
+   to appear on ANY track. If nothing appears: skip the unit with
+   reason `"item did not appear on timeline within item_wait_s
+   seconds"` — do NOT advance `pos`, the slot is held for the next
+   unit.
+2. Reposition the discovered item to current `pos` and re-write
+   its motion envelopes at the new range.
+3. Wrap region 1: `name_01` = `[pos, pos+len+region_pad]`.
+   Advance `pos += len + region_pad + gap`.
+4. For variation `v` from 2 to `unit.variations`:
+   - Create a new media item on the SAME track as the discovered
+     original (preserves the export's track choice), named
+     `anim_<vv>`. Length = original's length.
+   - Re-write envelopes.
+   - Wrap region `name_<vv>` = `[pos, pos+len+region_pad]`.
+   - Advance `pos += len + region_pad + gap`.
+
+### Added — per-unit `variations`
+- Each unit now accepts `variations` (default `1`). The original
+  item gets wrapped as `_01`; values `>1` create that many
+  duplicates on the same track and wrap each one. Item names get
+  the same `_NN` suffix as their region so
+  `ResolveAnimationByItemName` (variation-suffix stripping) still
+  resolves duplicates back to the source animation during playback.
+
+### Changed — `after_last` lead-gap (fix #1)
+- `start_mode="after_last"` now returns `FindLastRegionEnd() + gap`
+  instead of just `FindLastRegionEnd()`. Previously the first new
+  region butted directly against the last existing one — visually
+  hard to tell apart. Now there's always at least one `gap`
+  between the previous batch and the new one.
+
+### Region naming convention
+- All regions are `<unit.name>_<NN>`, two-digit zero-padded. Even
+  the single-variation case is `_01` (was bare `<name>` in alpha.1).
+  Predictable for clients that filter by suffix.
+
+### Removed
+- `CreateNamedItemWithRolls` is no longer called for variation 1.
+  Skipped reasons consequently lose `"item creation failed"` — that
+  case only fires now for duplicate variations 2..N.
+
+### Caller note
+- "Не клади свои айтемы — их кладёт экспорт": the export pipeline
+  should place the initial item (e.g. via HoloRoll's hot-reload
+  auto-placement); `build_regions` should be a single call AFTER
+  the export has settled. Re-running the verb on the same units
+  will silently produce duplicates, because each call wraps the
+  first matching item it finds.
+
+
 ## [0.14.0-alpha.1] — 2026-05-08
 
 Start of the 0.14.0 cycle. Single feature this release:
@@ -1883,7 +1948,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.2...HEAD
+[0.14.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.2
 [0.14.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.1
 [0.13.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.4
 [0.13.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.3
