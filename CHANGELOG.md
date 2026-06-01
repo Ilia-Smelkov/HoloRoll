@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0-alpha.4] — 2026-05-08
+
+CI was silently mis-tagging every alpha release. Fixed, plus the
+running build now shows its version in the overlay so you can
+confirm at a glance.
+
+### Fixed
+- **Release workflow accepted only clean semver tags.** The regex
+  in `.github/workflows/release.yml` was `^v(\d+\.\d+\.\d+)$` —
+  matched `v0.13.0` but NOT `v0.13.0-alpha.3`. Every alpha tag
+  fell through to the CMakeLists fallback, which derived
+  `version=0.13.0`, tagged the GitHub Release as `v0.13.0`, and
+  named the installer `HoloRoll-Setup-0.13.0.exe`. Each new
+  alpha push silently OVERWROTE the previous Release on the same
+  tag, and the in-app updater always saw "v0.13.0" as the latest
+  available version regardless of how many alphas had been
+  published. Hence "не последнюю версию ставит" — it was
+  re-installing the same `0.13.0` installer every time.
+
+  alpha.4 widens the regex to
+  `^v(\d+\.\d+\.\d+(?:-[\w.]+)?)$`, so `v0.13.0-alpha.3` matches
+  and the release pipeline preserves the full version through to
+  the installer filename, the GitHub Release tag, and the
+  updater-visible `tag_name`.
+
+- **`VersionInfoVersion` no longer rejects pre-release tails.**
+  Windows' file-version metadata is strict X.Y.Z[.W] — Inno Setup
+  fails if `MyAppVersion` has a `-alpha.N` suffix and you feed it
+  straight to `VersionInfoVersion`. alpha.4 introduces a separate
+  `MyFileVersion` define (defaults to `MyAppVersion` for backward
+  compat with local builds). The release workflow now derives it
+  by stripping the pre-release tail and passes both to ISCC:
+  `MyAppVersion=0.13.0-alpha.4`, `MyFileVersion=0.13.0`.
+
+### Added
+- **Version label in the HoloRoll overlay.** A small disabled-text
+  line at the bottom of the overlay window reads
+  `HoloRoll v0.13.0-alpha.4`. Single source: `HOLOROLL_VERSION_STRING`
+  in `src/extension/version.h`. Gives the user a way to verify
+  that an update actually took effect (vs. the watchdog silently
+  failing).
+
+### Migration
+- Previous alpha tags (`v0.13.0-alpha.1`, `.2`, `.3`) on GitHub
+  are stuck pointing at the old `v0.13.0` release. The next push
+  to `v0.13.0-alpha.4` will create a NEW, properly-tagged Release.
+  If you want to clean up, manually delete the stranded
+  `v0.13.0` Release from the Releases page; the tag itself can
+  stay as a marker.
+- After this fix lands, the updater's `releases/latest` lookup
+  will return whatever the most recent alpha tag is (alpha.4
+  onward). Until alpha.4 is published, the updater keeps seeing
+  the old broken `v0.13.0` and will appear stuck on it.
+
+
 ## [0.13.0-alpha.3] — 2026-05-08
 
 New socket verb `build_regions`. Item-anchored region creation:
@@ -1780,7 +1835,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.13.0-alpha.3...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.13.0-alpha.4...HEAD
+[0.13.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.4
 [0.13.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.3
 [0.13.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.2
 [0.13.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.1

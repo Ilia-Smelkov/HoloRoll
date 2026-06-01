@@ -1126,6 +1126,11 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   }
 
   ImGui::Separator();
+  // v0.13.0-alpha.4: show the running build's version so the user
+  // can sanity-check that an update actually landed (vs. the staged
+  // installer silently doing nothing). Single source of truth in
+  // extension/version.h; HOLOROLL_VERSION_STRING gets compiled in.
+  ImGui::TextDisabled("HoloRoll v%s", HOLOROLL_VERSION_STRING);
   ImGui::TextDisabled("RMB + WASD/QE = fly | wheel = speed | LMB-drag arcs = rotate");
   ImGui::End();
 

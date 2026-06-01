@@ -29,7 +29,14 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $manual = "${{ inputs.version }}"
-          if ($tag -match '^v(\d+\.\d+\.\d+)$') {
+          # alpha.4 fix: accept BOTH clean semver (v0.13.0) AND pre-release
+          # tags (v0.13.0-alpha.3, v0.13.0-beta.1, etc.). Previously the
+          # regex was '^v(\d+\.\d+\.\d+)$' — alpha tags fell through to
+          # the CMakeLists fallback and got mis-tagged as the base
+          # version (e.g. every alpha.X release was published as
+          # "v0.13.0", overwriting the previous one and confusing the
+          # in-app updater).
+          if ($tag -match '^v(\d+\.\d+\.\d+(?:-[\w.]+)?)$') {
             $version = $Matches[1]
             $tagName = $tag
           } elseif ($manual) {
@@ -44,9 +51,15 @@ jobs:
               throw "Could not detect version."
             }
           }
-          Write-Host "Resolved version: $version (tag: $tagName)"
-          "version=$version"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "tag_name=$tagName"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          # Inno Setup's VersionInfoVersion field is the Windows
+          # file-version metadata — it MUST be 1-4 numeric components
+          # (no "-alpha.3" allowed). Strip the pre-release tail for
+          # that field while keeping the full version everywhere else.
+          $fileVersion = ($version -split '-')[0]
+          Write-Host "Resolved version: $version (tag: $tagName, file: $fileVersion)"
+          "version=$version"          | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag_name=$tagName"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "file_version=$fileVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Configure CMake (Release)
         run: cmake --preset x64-Release
@@ -125,8 +138,13 @@ jobs:
         shell: pwsh
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          FILE_VERSION: ${{ steps.version.outputs.file_version }}
         run: |
-          ISCC.exe "/DMyAppVersion=$env:VERSION" "/Qp" installer\holoroll.iss
+          # alpha.4 fix: pass both MyAppVersion (full version with
+          # alpha suffix, used for UI / install-info) and MyFileVersion
+          # (strict X.Y.Z, used for Windows file-version metadata).
+          # See installer\holoroll.iss for how they're consumed.
+          ISCC.exe "/DMyAppVersion=$env:VERSION" "/DMyFileVersion=$env:FILE_VERSION" "/Qp" installer\holoroll.iss
           $exe = "dist\HoloRoll-Setup-$env:VERSION.exe"
           if (-not (Test-Path $exe)) {
             throw "Installer not produced at $exe"

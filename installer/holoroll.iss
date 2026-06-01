@@ -37,10 +37,22 @@
 #define MyDllName        "reaper_holoroll.dll"
 #define MyLegacyDllName  "reaper_mdd_viewport.dll"
 
-; Version is injected from the command line by build_installer.ps1:
-;   ISCC /DMyAppVersion=0.1.0 holoroll.iss
+; Version is injected from the command line by build_installer.ps1
+; (local) or the GitHub Actions release workflow:
+;   ISCC /DMyAppVersion=0.13.0-alpha.4 /DMyFileVersion=0.13.0 holoroll.iss
+;
+; MyAppVersion (full, may include "-alpha.N"): user-facing label —
+;   AppVersion, UninstallDisplayName, installer filename.
+; MyFileVersion (strict X.Y.Z, alpha.4+): goes into VersionInfoVersion,
+;   which becomes the Windows file-version metadata (Properties dialog).
+;   Inno rejects pre-release suffixes there. Defaults to MyAppVersion if
+;   not supplied, so local build_installer.ps1 doesn't have to change
+;   — but tagged alpha releases MUST set MyFileVersion explicitly.
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
+#endif
+#ifndef MyFileVersion
+  #define MyFileVersion MyAppVersion
 #endif
 
 ; Output directory & filename, also overridable from the command line.
@@ -61,7 +73,7 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
-VersionInfoVersion={#MyAppVersion}.0
+VersionInfoVersion={#MyFileVersion}.0
 ; The plugin folder is determined automatically (REAPER's UserPlugins).
 ; Users almost never need to override it; for portable REAPER setups they
 ; can pass /DIR=... on the command line.
