@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0-alpha.4] — 2026-05-08
+
+Deterministic preview priority for overlapping items.
+
+### Changed
+- **`ResolvePlayheadFromItems` priority is now explicit, not
+  enumeration-order-dependent.** Previously the resolver returned
+  the first item it found whose effective window (item bounds +
+  global pre/post-roll) covered the playhead — which was the
+  correct top-track-earliest result IFF REAPER returned items in
+  (track-asc, position-asc) order. That held for non-overlapping
+  items but is undefined when items overlap on the same track
+  (allow-overlapping mode, manual drag-overlap, etc.).
+  alpha.4 walks every candidate and picks the best one via two
+  explicit tie-break rules:
+  1. **Cross-track**: smaller `trackIndex` wins (top track always
+     overrides items on lower tracks during conflicts).
+  2. **Same track**: smaller `startSeconds` wins (the item that
+     started earlier — "previous" — keeps the screen until its
+     effective window ends; the next item's pre-roll/body is
+     hidden during overlap, producing a sharp cut on entry).
+
+### Semantics note
+- Containment case (B fully inside A on the same track, e.g.
+  A=[10..20], B=[12..15]) → A wins across [10..20]; B never
+  becomes visible. Surprising in isolation but the literal
+  consequence of "earlier on same track always wins". If this
+  comes up as a real workflow problem we can layer a nuanced rule
+  on top (e.g. "shorter contained item wins inside the container"
+  or explicit per-item priority). For now the rule stays simple.
+
+
+## [0.14.0-alpha.3] — 2026-05-08
+
+`build_regions` distinguishes within-anim spacing from anim-to-anim
+spacing. Layout pacing is now controllable independently.
+
+### Added — `anim_gap` arg
+- New top-level arg on `build_regions`:
+  ```
+  { "units": [...], "gap": <float>, "anim_gap": <float>, ... }
+  ```
+  - `gap` — seconds between variations OF THE SAME animation
+    (variation 1 → 2 → 3 within one unit).
+  - `anim_gap` — seconds between the LAST variation of one unit and
+    the FIRST variation of the next unit.
+  - Defaults to `gap` if not supplied, so pre-alpha.3 callers
+    behave identically. Pass it explicitly only when you want
+    bigger / smaller separation between different animations than
+    within their variations.
+- Lead gap (between the last pre-existing region and the first
+  newly-built region under `start_mode=after_last`) still uses
+  `gap`. Spec: "лид-гэп = gap после последнего региона перед
+  первым новым".
+
+### Implementation note
+- After a unit's variations loop, we adjust `pos += (anim_gap - gap)`
+  to replace the trailing intra-unit `gap` with the inter-unit
+  `anim_gap`. Units that fully skipped (item never appeared) hit
+  the early `continue` and don't trigger the adjustment, so no
+  spurious gap is added for an empty unit.
+
+
 ## [0.14.0-alpha.2] — 2026-05-08
 
 `build_regions` flips its model: items are no longer ours to create —
@@ -1948,7 +2011,9 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.2...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.4...HEAD
+[0.14.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.4
+[0.14.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.3
 [0.14.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.2
 [0.14.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.1
 [0.13.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.13.0-alpha.4

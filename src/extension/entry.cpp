@@ -1644,8 +1644,26 @@ ItemResolveResult ResolvePlayheadFromItems(double playheadSeconds,
                                            float globalPostRollSec) {
   ItemResolveResult result;
 
-  // Tracks are visited in order, so the first overlap we hit is by
-  // definition the topmost track's item.
+  // v0.14.0-alpha.4: explicit best-candidate walk replaces the previous
+  // "return on first match" loop. Reason: previously we depended on
+  // REAPER's item-enumeration order to deliver items in (top-track,
+  // earliest-first) sequence — true for non-overlapping items but not
+  // guaranteed when items overlap on the same track (allow-overlapping
+  // mode, or manual drag-overlap). The deterministic walk encodes the
+  // priority rule directly:
+  //
+  //   1. CROSS-TRACK: smallest `trackIndex` wins (top track always
+  //      visible, items on lower tracks hidden during conflicts).
+  //   2. SAME-TRACK : smallest `startSeconds` wins (the item that
+  //      started earlier — "previous" — keeps the screen; the next
+  //      item's pre-roll / body is hidden until the prior item's
+  //      effective window ends, producing a sharp cut on entry).
+  //
+  // Containment case (B fully inside A on same track, e.g. A=[10..20]
+  // and B=[12..15]): A wins across the entire [10..20] window, B is
+  // never visible. Surprising in isolation but the literal "previous
+  // wins" rule we agreed on.
+  const DiscoveredItem* best = nullptr;
   for (const auto& di : items) {
     // Match window expanded by global pre/post-roll — these are the
     // visual buffers where we still want to show frame 0 / last frame.
@@ -1653,35 +1671,47 @@ ItemResolveResult ResolvePlayheadFromItems(double playheadSeconds,
     const double matchEnd   = di.endSeconds   + static_cast<double>(globalPostRollSec);
     if (playheadSeconds < matchStart || playheadSeconds > matchEnd) continue;
 
-    result.foundAny = true;
-    result.itemStart = di.startSeconds;
-    result.itemEnd = di.endSeconds;
-
-    const std::size_t animIdx = g_lib.ResolveAnimationByItemName(di.name);
-    if (animIdx == std::numeric_limits<std::size_t>::max()) {
-      result.missingAnimationName = di.name;
-      return result;
+    if (!best) {
+      best = &di;
+      continue;
     }
-
-    result.animationIndex = animIdx;
-    const LoadedAnimation& anim = g_lib.At(animIdx);
-    const std::uint32_t totalFrames = anim.TotalFrames();
-    if (totalFrames == 0) {
-      result.frameIndex = 0;
-    } else {
-      // Localise to item-start time. Negative -> still in pre-roll buffer
-      // (clamp to frame 0). Beyond duration -> in post-roll buffer
-      // (clamp to last frame).
-      const double localTime = playheadSeconds - di.startSeconds;
-      const double lastFrame = static_cast<double>(totalFrames - 1);
-      double f = std::floor(localTime * fps);
-      if (f < 0.0) f = 0.0;
-      if (f > lastFrame) f = lastFrame;
-      result.frameIndex = static_cast<std::uint32_t>(f);
+    // Cross-track tie-break: smaller trackIndex (top) wins.
+    if (di.trackIndex != best->trackIndex) {
+      if (di.trackIndex < best->trackIndex) best = &di;
+      continue;
     }
+    // Same track: earlier startSeconds (previous) wins.
+    if (di.startSeconds < best->startSeconds) best = &di;
+  }
+
+  if (!best) return result;
+
+  result.foundAny = true;
+  result.itemStart = best->startSeconds;
+  result.itemEnd = best->endSeconds;
+
+  const std::size_t animIdx = g_lib.ResolveAnimationByItemName(best->name);
+  if (animIdx == std::numeric_limits<std::size_t>::max()) {
+    result.missingAnimationName = best->name;
     return result;
   }
 
+  result.animationIndex = animIdx;
+  const LoadedAnimation& anim = g_lib.At(animIdx);
+  const std::uint32_t totalFrames = anim.TotalFrames();
+  if (totalFrames == 0) {
+    result.frameIndex = 0;
+  } else {
+    // Localise to item-start time. Negative -> still in pre-roll buffer
+    // (clamp to frame 0). Beyond duration -> in post-roll buffer
+    // (clamp to last frame).
+    const double localTime = playheadSeconds - best->startSeconds;
+    const double lastFrame = static_cast<double>(totalFrames - 1);
+    double f = std::floor(localTime * fps);
+    if (f < 0.0) f = 0.0;
+    if (f > lastFrame) f = lastFrame;
+    result.frameIndex = static_cast<std::uint32_t>(f);
+  }
   return result;
 }
 
@@ -2481,6 +2511,11 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
 
   const double regionPad = args.value("region_pad", 0.0);
   const double gap       = args.value("gap", 0.0);
+  // alpha.3: gap BETWEEN different animations. Defaults to `gap` so
+  // pre-alpha.3 callers behave exactly as before; pass it explicitly
+  // when you want anim-to-anim spacing different from within-anim
+  // variation spacing.
+  const double animGap   = args.value("anim_gap", gap);
   const std::string startMode = args.value("start_mode", std::string("after_last"));
   const bool clearExisting    = args.value("clear_existing", false);
   // v0.13.0-alpha.5: per-unit polling budget. Items can take a moment
@@ -2675,6 +2710,15 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
       });
       pos = regionEnd + gap;
     }
+
+    // alpha.3: at the unit boundary, replace the trailing `gap` (which
+    // was added after the last variation) with `anim_gap`. No-op when
+    // anim_gap == gap (default), so backwards-compatible. We only
+    // reach this point if at least variation 1 was placed — units
+    // that skipped due to "item did not appear" hit `continue` above
+    // and never advanced `pos` in the first place, so no
+    // adjustment is needed for them.
+    pos += (animGap - gap);
   }
 
   if (api.preventUIRefresh) api.preventUIRefresh(-1);
