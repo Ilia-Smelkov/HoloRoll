@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0-alpha.5] — 2026-06-04
+
+`build_regions` units gain a `reverse` flag for native REAPER
+section/reverse playback, with synchronised reverse-direction 3D
+preview.
+
+### Added — `reverse` per unit
+
+- New per-unit field:
+  ```jsonc
+  {
+    "anim": "door_open",
+    "name": "DoorClose",
+    "variations": 3,
+    "reverse": true
+  }
+  ```
+- When `reverse: true`, the unit does NOT reposition the discovered
+  source item. Instead it clones the source N times (variations
+  1..N), each placed at the running `pos` on the source's track, and
+  wraps the new takes' audio in REAPER's built-in
+  `<SOURCE SECTION MODE 2>` block — the exact same flag the GUI
+  exposes via *Item Properties → Section → Reverse*. REAPER then
+  plays each cloned take's audio backwards in real time without
+  rendering a separate reversed file to disk.
+- The forward variant of the same animation (if listed earlier in
+  `units` with `reverse: false`) takes ownership of the source's
+  position; reverse just borrows the source as a chunk template.
+- Geometry rules (item length, region padding, `gap`, `anim_gap`)
+  are identical between forward and reverse units, so the two
+  interleave cleanly in `units` ordering.
+- Recommended pairing pattern:
+  ```jsonc
+  "units": [
+    { "anim": "door_open", "name": "DoorOpen",  "variations": 3 },
+    { "anim": "door_open", "name": "DoorClose", "variations": 3, "reverse": true }
+  ]
+  ```
+  Forward unit moves the source to its slot and lays out its 3
+  variation regions, reverse unit then places 3 chunk-cloned reverse
+  copies right after.
+
+### Added — preview-side reverse awareness
+
+- `DiscoveredItem.isReverse` populated by `EnumProjectItems` via
+  per-item P_CHUNK inspection (substring search for
+  `<SOURCE SECTION` + `MODE 2`).
+- `ResolvePlayheadFromItems` now inverts frame computation when the
+  resolved item is reverse:
+  ```
+  frame = (totalFrames - 1) - floor(localTime * fps)
+  ```
+  clamped to `[0, lastFrame]`. Pre-roll buffer shows the LAST frame
+  (the first frame in reverse playback), post-roll shows frame 0 —
+  a clean mirror of the forward semantics.
+- Motion envelopes for reverse items sample motion data in inverted
+  order (`motion[total-1-f]`), so the envelope curves visualise the
+  same backwards motion REAPER is playing audio-wise.
+
+### Internals — chunk manipulation
+
+- New helpers in `entry.cpp`:
+  - `ReadItemChunk` / `WriteItemChunk` — get/set the item's
+    `P_CHUNK` via `GetSetMediaItemInfo_String`.
+  - `IsItemReversedViaChunk` — detect SECTION/MODE 2.
+  - `WrapSourceInSectionReverse` — line-based chunk transform that
+    wraps the active take's `<SOURCE TYPE ...>` block in a
+    `<SOURCE SECTION ... MODE 2 ... >` outer block.
+  - `SetItemReverseViaChunk` — apply the wrap to an existing item.
+  - `CloneItemAtPosition` — duplicate an item by chunk-copy with
+    rewritten POSITION/NAME, stripped GUID/IGUID/IID (so REAPER
+    assigns fresh IDs on reparse), and optional SECTION/MODE 2
+    wrapping. Preserves audio source reference (no file duplication
+    on disk) thanks to REAPER's PCM_source reference counting.
+- 256 KB per-call chunk buffer — HoloRoll items chunks are
+  typically 1–3 KB; the headroom covers worst-case projects.
+
+### Why SECTION/MODE 2 and not "Reverse items as new take"
+
+- REAPER offers two reverse mechanisms: action 41051 (bakes a new
+  reversed audio file as a separate take) and section/reverse
+  (chunk-level `MODE 2` wrapper, plays backwards in real time).
+- Action 41051 leaves no API-detectable marker on the take — the
+  new take just points to a different file. HoloRoll would need a
+  custom side-channel marker (P_EXT) to know which items are
+  reverse, creating two-source-of-truth drift risk.
+- SECTION/MODE 2 is detectable purely by re-reading the chunk and
+  matches what the GUI's Item Properties → Section → Reverse
+  checkbox toggles. Single source of truth, consistent with REAPER's
+  native UI — what the user sees in the dialog matches what HoloRoll
+  uses for preview.
+
+### Caveats
+
+- Source files MUST exist on disk at clone time — chunk-clone copies
+  the FILE path verbatim; if the path resolves later (e.g. relinked
+  media), reverse copies pick up the change automatically.
+- Forward variations 2..N still use `CreateNamedItemWithRolls`
+  (empty items, name-only) as in alpha.3. They don't carry audio.
+  Reverse variations 1..N use the new `CloneItemAtPosition` path
+  and DO carry audio (the SECTION wrapper makes the reverse
+  effective).
+
+
 ## [0.14.0-alpha.4] — 2026-05-08
 
 Deterministic preview priority for overlapping items.
@@ -2011,7 +2115,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.4...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.5...HEAD
+[0.14.0-alpha.5]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.5
 [0.14.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.4
 [0.14.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.3
 [0.14.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.2

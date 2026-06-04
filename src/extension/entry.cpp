@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1057,6 +1058,288 @@ bool IsHoloRollItem(MediaItem* item) {
   return buf[0] != '\0';
 }
 
+// ---- v0.14.0-alpha.5 chunk helpers (section/reverse mechanism) ----------
+//
+// REAPER stores per-take reverse as a `<SOURCE SECTION ... MODE 2
+// <inner SOURCE> >` wrapper in the item's state chunk — same flag the
+// GUI exposes via Item Properties → Section → Reverse. No dedicated
+// API function exists; the only way to set/detect it from a plugin is
+// via the P_CHUNK string. Main_OnCommand(41051) ("Reverse items as new
+// take") wasn't suitable: it bakes a separate reversed audio file
+// instead and leaves no API-detectable marker on the take itself.
+//
+// We pick SECTION/MODE 2 because:
+//   1) REAPER plays the audio backwards in real time, no extra file
+//      lands on disk;
+//   2) the GUI Section-Reverse checkbox stays consistent with the
+//      programmatic state — user can verify by opening Item Properties;
+//   3) we can detect the reverse state by re-reading the chunk later,
+//      no separate side-channel marker drifts out of sync.
+//
+// Chunks are at most a few KB for HoloRoll items, so we allocate a
+// generous heap buffer per call (256 KB) and free it immediately.
+
+constexpr std::size_t kChunkBufferSize = 256 * 1024;  // 256 KB — HoloRoll items << 64 KB.
+
+// Read item's P_CHUNK. Returns empty string on failure. The chunk
+// returned is the REAPER-serialised representation of the item, ready
+// to be parsed line-by-line.
+std::string ReadItemChunk(MediaItem* item) {
+  if (!item) return {};
+  const auto& api = g_bridge.Api();
+  if (!api.getSetMediaItemInfo_String) return {};
+  std::vector<char> buf(kChunkBufferSize, '\0');
+  if (!api.getSetMediaItemInfo_String(item, "P_CHUNK", buf.data(), false)) {
+    return {};
+  }
+  return std::string(buf.data());
+}
+
+// Write item's P_CHUNK. Returns true on success. REAPER re-parses the
+// chunk and updates internal state accordingly — used to apply
+// modifications (POSITION, NAME, SECTION-wrap) atomically.
+bool WriteItemChunk(MediaItem* item, const std::string& chunk) {
+  if (!item || chunk.empty()) return false;
+  const auto& api = g_bridge.Api();
+  if (!api.getSetMediaItemInfo_String) return false;
+  // GetSet API takes a non-const char*. Copy into a local buffer.
+  std::vector<char> buf(chunk.begin(), chunk.end());
+  buf.push_back('\0');
+  return api.getSetMediaItemInfo_String(item, "P_CHUNK", buf.data(), true);
+}
+
+// True if the item's chunk contains a SECTION block with MODE 2 — i.e.
+// REAPER is configured to play this item's source backwards. Cheap
+// substring check; standard REAPER chunks only emit MODE 2 inside
+// SECTION blocks, so false positives are not a practical concern.
+bool IsItemReversedViaChunk(MediaItem* item) {
+  const std::string chunk = ReadItemChunk(item);
+  if (chunk.empty()) return false;
+  if (chunk.find("<SOURCE SECTION") == std::string::npos) return false;
+  // MODE line inside SECTION; we look for "MODE 2" on its own line.
+  // Match common indentations.
+  return chunk.find("\nMODE 2\n") != std::string::npos ||
+         chunk.find("\n  MODE 2\n") != std::string::npos ||
+         chunk.find("\n    MODE 2\n") != std::string::npos ||
+         chunk.find("\n\tMODE 2\n") != std::string::npos;
+}
+
+// Wrap the first non-SECTION <SOURCE TYPE ...> block in the chunk with
+// a <SOURCE SECTION ... MODE 2 ...> outer block. This is exactly the
+// same transformation REAPER performs when the user ticks Section +
+// Reverse in Item Properties. Returns the modified chunk; if no
+// suitable SOURCE block is found (or it's already SECTION-wrapped),
+// returns the chunk unchanged.
+//
+// Block detection is line-based: we find a line that starts with
+// optional whitespace then `<SOURCE TYPE` where TYPE != "SECTION".
+// We then track depth via `<...` (opener) vs `>` (closer) on
+// dedicated lines until the block closes at the same indentation as
+// the opener. The new SECTION wrapper is indented by the same prefix
+// as the original opener, with the inner block re-indented one level
+// deeper (two extra spaces) to keep the chunk visually clean.
+std::string WrapSourceInSectionReverse(const std::string& chunk,
+                                       double sourceLength) {
+  // Quick reject: already wrapped.
+  if (chunk.find("<SOURCE SECTION") != std::string::npos) return chunk;
+
+  std::istringstream iss(chunk);
+  std::ostringstream oss;
+  std::string line;
+  std::vector<std::string> lines;
+  while (std::getline(iss, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    lines.push_back(line);
+  }
+
+  // Find the first SOURCE block (non-SECTION).
+  auto leadingWhitespace = [](const std::string& s) {
+    std::size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    return s.substr(0, i);
+  };
+  auto trimLeading = [](const std::string& s) {
+    std::size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    return s.substr(i);
+  };
+
+  std::size_t openIdx = std::string::npos;
+  std::string openerIndent;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    const std::string body = trimLeading(lines[i]);
+    if (body.rfind("<SOURCE ", 0) == 0) {
+      // Skip SECTION (already wrapped or unrelated SECTION usage).
+      if (body.rfind("<SOURCE SECTION", 0) == 0) continue;
+      openIdx = i;
+      openerIndent = leadingWhitespace(lines[i]);
+      break;
+    }
+  }
+  if (openIdx == std::string::npos) return chunk;  // no SOURCE block.
+
+  // Find matching closer: line whose trimmed body == ">" and whose
+  // leading whitespace equals openerIndent. Depth-track intermediate
+  // `<...` openers so nested blocks inside SOURCE (rare but possible)
+  // don't confuse us.
+  int depth = 1;
+  std::size_t closeIdx = std::string::npos;
+  for (std::size_t i = openIdx + 1; i < lines.size(); ++i) {
+    const std::string body = trimLeading(lines[i]);
+    if (body.rfind("<", 0) == 0 && body != ">") {
+      ++depth;
+    } else if (body == ">") {
+      --depth;
+      if (depth == 0) {
+        closeIdx = i;
+        break;
+      }
+    }
+  }
+  if (closeIdx == std::string::npos) return chunk;  // malformed chunk.
+
+  // Build output:
+  //   <pre-openIdx lines>
+  //   <openerIndent><SOURCE SECTION
+  //   <openerIndent>  LENGTH <sourceLength>
+  //   <openerIndent>  MODE 2
+  //   <openerIndent>  <original SOURCE block, re-indented +2 spaces>
+  //   <openerIndent>>
+  //   <post-closeIdx lines>
+  for (std::size_t i = 0; i < openIdx; ++i) {
+    oss << lines[i] << "\n";
+  }
+  oss << openerIndent << "<SOURCE SECTION\n";
+  // LENGTH/MODE lines indented one level deeper than the opener.
+  // REAPER expects LENGTH for SECTION wrappers; we use the item's
+  // source length so the section spans the entire audio file.
+  char numBuf[64];
+  std::snprintf(numBuf, sizeof(numBuf), "%.14g", sourceLength);
+  oss << openerIndent << "  LENGTH " << numBuf << "\n";
+  oss << openerIndent << "  MODE 2\n";
+  for (std::size_t i = openIdx; i <= closeIdx; ++i) {
+    oss << "  " << lines[i] << "\n";  // re-indent inner block.
+  }
+  oss << openerIndent << ">\n";
+  for (std::size_t i = closeIdx + 1; i < lines.size(); ++i) {
+    oss << lines[i] << "\n";
+  }
+  return oss.str();
+}
+
+// Apply SECTION/MODE 2 wrapping in-place to an existing item. Returns
+// true if the chunk was modified (or was already in reverse mode).
+// Used after CloneItemAtPosition's chunk-copy to flip the new item
+// into reverse playback without round-tripping through a SOURCE
+// reconstruction.
+bool SetItemReverseViaChunk(MediaItem* item, double sourceLength) {
+  std::string chunk = ReadItemChunk(item);
+  if (chunk.empty()) return false;
+  if (chunk.find("<SOURCE SECTION") != std::string::npos) return true;
+  const std::string wrapped = WrapSourceInSectionReverse(chunk, sourceLength);
+  if (wrapped == chunk) return false;  // nothing to wrap.
+  return WriteItemChunk(item, wrapped);
+}
+
+// ---- v0.14.0-alpha.5 chunk-level item cloning ---------------------------
+//
+// Make a new item on dstTrack by duplicating src's serialised chunk,
+// then rewriting POSITION (place at `pos`), replacing the take name,
+// stripping IGUID/GUID/IID lines so REAPER assigns fresh IDs on
+// reparse, and — if reverseAudio is true — wrapping the SOURCE block
+// in SECTION MODE 2. The result has the same audio source as the
+// original (REAPER reference-counts PCM_sources, so the file on disk
+// is never copied), the requested name, and the requested reverse
+// state.
+//
+// Why chunk-clone instead of AddMediaItemToTrack + manual configure:
+// the SECTION wrapper lives ONLY inside the chunk — there's no
+// public API to construct a SECTION PCM_source from scratch. Cloning
+// the chunk and editing in place is the only way to get
+// SECTION/MODE 2 onto a new item.
+MediaItem* CloneItemAtPosition(MediaItem* src, MediaTrack* dstTrack,
+                               double pos, const std::string& name,
+                               bool reverseAudio, double sourceLength) {
+  if (!src || !dstTrack) return nullptr;
+  const auto& api = g_bridge.Api();
+  if (!api.addMediaItemToTrack || !api.getSetMediaItemInfo_String) return nullptr;
+
+  std::string srcChunk = ReadItemChunk(src);
+  if (srcChunk.empty()) return nullptr;
+
+  // --- Rewrite chunk -------------------------------------------------
+  std::istringstream iss(srcChunk);
+  std::ostringstream oss;
+  std::string line;
+  bool positionReplaced = false;
+  bool nameReplaced = false;
+
+  auto trimLeading = [](const std::string& s) {
+    std::size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    return s.substr(i);
+  };
+  auto leadingWhitespace = [](const std::string& s) {
+    std::size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    return s.substr(0, i);
+  };
+
+  while (std::getline(iss, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const std::string body = trimLeading(line);
+
+    // Drop IGUID/GUID/IID — REAPER will generate fresh ones on reparse.
+    // Without this, the new item collides with the source on undo/redo.
+    if (body.rfind("IGUID ", 0) == 0 ||
+        body.rfind("GUID ",  0) == 0 ||
+        body.rfind("IID ",   0) == 0) {
+      continue;
+    }
+
+    // Rewrite POSITION (first occurrence only — top-level item position).
+    if (!positionReplaced && body.rfind("POSITION ", 0) == 0) {
+      char numBuf[64];
+      std::snprintf(numBuf, sizeof(numBuf), "%.14g", pos);
+      oss << leadingWhitespace(line) << "POSITION " << numBuf << "\n";
+      positionReplaced = true;
+      continue;
+    }
+
+    // Rewrite take NAME (first occurrence — active take of the source).
+    // REAPER chunk format uses NAME "..." with quotes; we replicate that.
+    if (!nameReplaced && body.rfind("NAME ", 0) == 0) {
+      oss << leadingWhitespace(line) << "NAME \"" << name << "\"\n";
+      nameReplaced = true;
+      continue;
+    }
+
+    oss << line << "\n";
+  }
+  std::string modified = oss.str();
+
+  // Wrap SOURCE in SECTION/MODE 2 if reverse requested. Done AFTER
+  // POSITION/NAME edits so the wrapping pass doesn't have to skip
+  // over a half-edited chunk.
+  if (reverseAudio) {
+    modified = WrapSourceInSectionReverse(modified, sourceLength);
+  }
+
+  // --- Create empty item and apply chunk -----------------------------
+  MediaItem* newItem = api.addMediaItemToTrack(dstTrack);
+  if (!newItem) return nullptr;
+  if (!WriteItemChunk(newItem, modified)) {
+    // Best-effort: leave the empty item on the track if chunk apply
+    // failed. REAPER has no public RemoveMediaItem in the bare API.
+    return nullptr;
+  }
+  // The HoloRoll P_EXT marker is part of the cloned chunk, but we
+  // re-stamp it defensively in case the source wasn't a HoloRoll item
+  // (future use as a generic clone helper).
+  MarkAsHoloRollItem(newItem);
+  return newItem;
+}
+
 // v0.9.1: find the latest region end across the entire project. Used to
 // place new items right after existing content so we never overlap.
 // Returns 0.0 if no regions exist (placement starts at timeline origin).
@@ -1377,7 +1660,8 @@ void EnsureEnvelopeVisible(TrackEnvelope* env, int paramIdx) {
 bool WriteMotionEnvelopeForBone(MediaTrack* track, int fxIdx, int paramIdx,
                                 const std::vector<float>& motion,
                                 double itemStartSec, double fps,
-                                float sharedMin, float sharedMax) {
+                                float sharedMin, float sharedMax,
+                                bool reversed = false) {
   const auto& api = g_bridge.Api();
   if (!api.getFXEnvelope || !api.insertEnvelopePoint ||
       !api.envelope_SortPoints || !api.deleteEnvelopePointRange) {
@@ -1409,13 +1693,17 @@ bool WriteMotionEnvelopeForBone(MediaTrack* track, int fxIdx, int paramIdx,
   // the alpha.6/.7 forward-fill workaround is gone.
 
   // Batch-insert all points with noSortIn=true; sort once at the end.
+  // v0.14.0-alpha.5: when reversed, sample motion[] from the end —
+  // motion[total-1-f] — so the envelope visualises the same backwards
+  // motion that REAPER is playing audio-wise.
   bool noSort = true;
   for (std::size_t f = 0; f < nFrames; ++f) {
     const double t = itemStartSec + static_cast<double>(f) / fps;
+    const std::size_t srcF = reversed ? (nFrames - 1 - f) : f;
     // Min-max stretch into [0, 1]. Clamp defensively for outlier
     // frames (those below 5th or above 95th percentile).
     double v = degenerate ? 0.0
-                          : static_cast<double>((motion[f] - sharedMin) * invRange);
+                          : static_cast<double>((motion[srcF] - sharedMin) * invRange);
     if (v < 0.0) v = 0.0;
     else if (v > 1.0) v = 1.0;
     api.insertEnvelopePoint(env, t, v, /*shape=*/0, /*tension=*/0.0,
@@ -1444,7 +1732,8 @@ bool WriteMotionEnvelopeForBone(MediaTrack* track, int fxIdx, int paramIdx,
 // downward by exactly that artefact we're trying to ignore.
 void WriteMotionEnvelopesForItem(MediaTrack* motionTrack, int fxIdx,
                                  const LoadedAnimation& anim,
-                                 double itemStartSec, double fps) {
+                                 double itemStartSec, double fps,
+                                 bool reversed = false) {
   if (anim.worldMotion.empty()) return;
   const std::vector<std::size_t> topBones = TopNActiveBones(anim.worldMotion, kMotionTopN);
   if (topBones.empty()) return;
@@ -1477,7 +1766,8 @@ void WriteMotionEnvelopesForItem(MediaTrack* motionTrack, int fxIdx,
     WriteMotionEnvelopeForBone(motionTrack, fxIdx, paramIdx,
                                anim.worldMotion[boneIdx],
                                itemStartSec, fps,
-                               sharedMin, sharedMax);
+                               sharedMin, sharedMax,
+                               reversed);
   }
 }
 
@@ -1556,6 +1846,12 @@ struct DiscoveredItem {
   // item start.
   float preRollSec = 0.0f;
   float postRollSec = 0.0f;
+  // v0.14.0-alpha.5: native REAPER section/reverse state, read from
+  // the item's serialised chunk. True iff the take is wrapped in
+  // <SOURCE SECTION ... MODE 2 ...>. Drives reverse-direction frame
+  // computation in ResolvePlayheadFromItems so the 3D preview plays
+  // the animation backwards in sync with the audio.
+  bool isReverse = false;
 };
 
 // Walk every track in the project, then every item on each track, and return
@@ -1593,6 +1889,11 @@ std::vector<DiscoveredItem> EnumProjectItems() {
       // global current settings drive playback now.
       di.preRollSec = 0.0f;
       di.postRollSec = 0.0f;
+      // v0.14.0-alpha.5: detect SECTION/MODE 2 reverse via chunk
+      // inspection. Cost: one P_CHUNK read per item per OnTimer tick.
+      // HoloRoll items have ~1-3 KB chunks and substring search is
+      // O(n) — fine for the ~tens of items typical in a project.
+      di.isReverse = IsItemReversedViaChunk(item);
       out.push_back(std::move(di));
     }
   }
@@ -1703,11 +2004,20 @@ ItemResolveResult ResolvePlayheadFromItems(double playheadSeconds,
     result.frameIndex = 0;
   } else {
     // Localise to item-start time. Negative -> still in pre-roll buffer
-    // (clamp to frame 0). Beyond duration -> in post-roll buffer
-    // (clamp to last frame).
+    // (clamp to frame 0 [forward] / last frame [reverse]). Beyond
+    // duration -> in post-roll buffer (clamp to last frame [forward] /
+    // frame 0 [reverse]).
     const double localTime = playheadSeconds - best->startSeconds;
     const double lastFrame = static_cast<double>(totalFrames - 1);
     double f = std::floor(localTime * fps);
+    // v0.14.0-alpha.5: reverse mirrors the timebase around the
+    // animation's centre. Pre-roll then shows the LAST frame (the
+    // first frame in reverse playback) and post-roll shows frame 0.
+    // The clamp domain is the same [0, lastFrame] either way; we
+    // just invert the mapping.
+    if (best->isReverse) {
+      f = lastFrame - f;
+    }
     if (f < 0.0) f = 0.0;
     if (f > lastFrame) f = lastFrame;
     result.frameIndex = static_cast<std::uint32_t>(f);
@@ -2578,6 +2888,13 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
     const std::string regionBase = unit.value("name", std::string{});
     int variations = unit.value("variations", 1);
     if (variations < 1) variations = 1;
+    // v0.14.0-alpha.5: reverse-unit flag. When true, this unit does
+    // NOT reposition the source item — it instead clones the source
+    // N times via the SECTION/MODE 2 mechanism so each copy plays
+    // its audio backwards. The forward unit (typically listed before
+    // this one in `units`) is the one that takes ownership of the
+    // source's position.
+    const bool reverseUnit = unit.value("reverse", false);
     if (anim.empty()) {
       skipped.push_back({{"anim", anim}, {"reason", "empty 'anim'"}});
       continue;
@@ -2641,74 +2958,125 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
     // exact duration via CreateNamedItemWithRolls).
     const double il = api.getMediaItemInfo_Value(discoveredItem, "D_LENGTH");
 
-    // Reposition the discovered item to current pos. Re-write envelopes
-    // at the new range so they follow the item.
-    if (api.setMediaItemInfo_Value) {
-      api.setMediaItemInfo_Value(discoveredItem, "D_POSITION", pos);
-    }
-    if (loc.fxIdx >= 0) {
-      WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
-    }
-
     auto formatSuffix = [](int v) {
       char buf[8];
       std::snprintf(buf, sizeof(buf), "_%02d", v);
       return std::string(buf);
     };
 
-    // Variation 1: wrap the repositioned original item.
-    {
-      const std::string regionName = regionBase + formatSuffix(1);
-      const double regionStart = pos;
-      const double regionEnd   = pos + il + regionPad;
-      api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
-                            regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
-      created.push_back({
-          {"name",  regionName},
-          {"start", regionStart},
-          {"end",   regionEnd},
-      });
-      pos = regionEnd + gap;
-    }
+    // v0.14.0-alpha.5: reverse-unit path takes precedence — it does
+    // not touch the source's position. The source stays wherever the
+    // forward unit (earlier in `units`) placed it; reverse-unit just
+    // uses the discovered item as a CHUNK TEMPLATE for cloning.
+    // Geometry rules (length, region pad, gap advance) are identical
+    // to the forward path so the two units lay out interchangeably.
+    if (reverseUnit) {
+      for (int v = 1; v <= variations; ++v) {
+        const std::string suffix = formatSuffix(v);
+        // Variation 1 uses the bare anim name (matches forward's
+        // variation 1 convention); 2..N append the _NN suffix.
+        // Multiple items can share the same name on a track; HoloRoll
+        // distinguishes reverse from forward via the chunk's SECTION
+        // MODE 2 flag, not via the take name.
+        const std::string itemName = (v == 1) ? anim : (anim + suffix);
+        const std::string regionName = regionBase + suffix;
 
-    // Variations 2..N: duplicate the item onto the same track at the
-    // running pos and wrap each one. Item name carries the same _NN
-    // suffix as the region so HoloRoll's variation-aware playback
-    // (`ResolveAnimationByItemName` strips trailing _<digits>) still
-    // resolves them back to the source animation.
-    for (int v = 2; v <= variations; ++v) {
-      const std::string suffix = formatSuffix(v);
-      const std::string itemName = anim + suffix;
-      const std::string regionName = regionBase + suffix;
+        MediaItem* clone = CloneItemAtPosition(discoveredItem, discoveredTrack,
+                                               pos, itemName,
+                                               /*reverseAudio=*/true, il);
+        if (!clone) {
+          skipped.push_back({
+              {"anim",   anim + suffix},
+              {"reason", "reverse clone failed"},
+          });
+          continue;
+        }
 
-      // Duplicate = new media item on the SAME track as the original
-      // (preserves whatever placement choice the export made; we don't
-      // force everything onto the HoloRoll items track).
-      MediaItem* dup = CreateNamedItemWithRolls(discoveredTrack, pos, il,
-                                                 0.0f, 0.0f, itemName);
-      if (!dup) {
-        skipped.push_back({
-            {"anim", anim + suffix},
-            {"reason", "duplicate item creation failed"},
+        if (loc.fxIdx >= 0) {
+          // Envelope sampled in reverse direction so the visualisation
+          // tracks the audio's backwards playback.
+          WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps,
+                                      /*reversed=*/true);
+        }
+
+        const double regionStart = pos;
+        const double regionEnd   = pos + il + regionPad;
+        api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
+                              regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
+        created.push_back({
+            {"name",    regionName},
+            {"start",   regionStart},
+            {"end",     regionEnd},
+            {"reverse", true},
         });
-        // Do NOT advance pos for a failed duplicate.
-        continue;
+        pos = regionEnd + gap;
       }
+    } else {
+      // ---- Forward path (unchanged from alpha.3 except now in else) ----
 
+      // Reposition the discovered item to current pos. Re-write envelopes
+      // at the new range so they follow the item.
+      if (api.setMediaItemInfo_Value) {
+        api.setMediaItemInfo_Value(discoveredItem, "D_POSITION", pos);
+      }
       if (loc.fxIdx >= 0) {
         WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
       }
 
-      const double regionStart = pos;
-      const double regionEnd   = pos + il + regionPad;
-      api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
-                            regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
-      created.push_back({
-          {"name",  regionName},
-          {"start", regionStart},
-          {"end",   regionEnd},
-      });
-      pos = regionEnd + gap;
+      // Variation 1: wrap the repositioned original item.
+      {
+        const std::string regionName = regionBase + formatSuffix(1);
+        const double regionStart = pos;
+        const double regionEnd   = pos + il + regionPad;
+        api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
+                              regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
+        created.push_back({
+            {"name",  regionName},
+            {"start", regionStart},
+            {"end",   regionEnd},
+        });
+        pos = regionEnd + gap;
+      }
+
+      // Variations 2..N: duplicate the item onto the same track at the
+      // running pos and wrap each one. Item name carries the same _NN
+      // suffix as the region so HoloRoll's variation-aware playback
+      // (`ResolveAnimationByItemName` strips trailing _<digits>) still
+      // resolves them back to the source animation.
+      for (int v = 2; v <= variations; ++v) {
+        const std::string suffix = formatSuffix(v);
+        const std::string itemName = anim + suffix;
+        const std::string regionName = regionBase + suffix;
+
+        // Duplicate = new media item on the SAME track as the original
+        // (preserves whatever placement choice the export made; we don't
+        // force everything onto the HoloRoll items track).
+        MediaItem* dup = CreateNamedItemWithRolls(discoveredTrack, pos, il,
+                                                   0.0f, 0.0f, itemName);
+        if (!dup) {
+          skipped.push_back({
+              {"anim", anim + suffix},
+              {"reason", "duplicate item creation failed"},
+          });
+          // Do NOT advance pos for a failed duplicate.
+          continue;
+        }
+
+        if (loc.fxIdx >= 0) {
+          WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
+        }
+
+        const double regionStart = pos;
+        const double regionEnd   = pos + il + regionPad;
+        api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
+                              regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
+        created.push_back({
+            {"name",  regionName},
+            {"start", regionStart},
+            {"end",   regionEnd},
+        });
+        pos = regionEnd + gap;
+      }
     }
 
     // alpha.3: at the unit boundary, replace the trailing `gap` (which
