@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <windows.h>
@@ -13,6 +14,38 @@ class GlViewport {
     Points = 0,
     Wireframe = 1,
     Solid = 2,
+  };
+
+  // v0.16.0-alpha.1 camera attach.
+  //
+  // Two modes: Free (existing Fly camera, WASD + RMB mouse look) and
+  // Attached (camera position derived from a chosen bone's world
+  // transform per frame). Attached splits further into three rotation
+  // sub-modes — see RotMode.
+  //
+  // boneName is matched against LoadedAnimation::jointNames at render
+  // time; if the current animation doesn't have a bone by that name we
+  // fall back to Free. Empty boneName == no attach configured.
+  //
+  // offset is the camera's position relative to the bone. If
+  // offsetLocal is true, the offset is in the bone's local space
+  // (rotates with the bone); otherwise it's in world space.
+  //
+  // damping smooths position changes. 0 = instant follow, 1 = heavy
+  // smoothing (≈0.5s settle time). Default 0.15 ≈ comfortable
+  // follow-cam feel.
+  struct CameraConfig {
+    enum class Mode { Free, Attached };
+    enum class RotMode { Full, YawOnly, FreeOrbit };
+
+    Mode mode = Mode::Free;
+    std::string boneName;
+    float offsetX = 0.0f;
+    float offsetY = 0.5f;
+    float offsetZ = -2.0f;
+    bool offsetLocal = true;
+    RotMode rotMode = RotMode::YawOnly;
+    float damping = 0.15f;
   };
 
   struct OverlayStatus {
@@ -56,6 +89,16 @@ class GlViewport {
     // v0.7.0: true when no project is saved (Untitled). Overlay shows a
     // hint instead of the regular library info.
     bool projectUntitled = false;
+
+    // v0.16.0-alpha.1 camera attach: pointers to the active animation's
+    // joint world-matrix table + name list. Both null for MDD-style
+    // animations without a skeleton, or when no animation is active.
+    // ApplyCameraTransform looks up CameraConfig.boneName here at the
+    // current `frameIndex` (passed separately to Render) to compute
+    // the bone-anchored camera basis.
+    using BoneMatrix = std::array<float, 16>;
+    const std::vector<std::vector<BoneMatrix>>* jointWorldMatrices = nullptr;
+    const std::vector<std::string>* jointNames = nullptr;
   };
 
   struct OverlayRequests {
@@ -138,6 +181,18 @@ class GlViewport {
   bool GetDebugEnabled() const;
   bool ConsumeDebugDirty();
 
+  // ---- v0.16.0-alpha.1 camera attach state ------------------------------
+  //
+  // Owned by GlViewport, edited by entry.cpp's overlay UI via
+  // SetCameraConfig / GetCameraConfig. ConsumeCameraDirty signals
+  // entry.cpp to persist to config (per-animation, sanitised name).
+  // The active animation name is needed for proper per-anim
+  // persistence — entry.cpp tracks it separately based on what's
+  // resolved under the playhead.
+  void SetCameraConfig(const CameraConfig& cfg);
+  const CameraConfig& GetCameraConfig() const;
+  bool ConsumeCameraDirty();
+
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   bool CreateContext();
@@ -163,6 +218,12 @@ class GlViewport {
   // Renders the modal dialog inside the current ImGui frame.
   // Returns: 0 if no choice was made this frame, 1 = Place all, 2 = Skip.
   int DrawNewAnimationsModal(const std::vector<std::string>& pending);
+
+  // v0.16.0-alpha.1: compute attachedTargetPos_/Yaw_/Pitch_ from the
+  // configured bone + offset + current frame. attachedActive_ ends up
+  // false if no bone resolved (Free mode, missing bone, MDD anim).
+  void ResolveAttachedTarget(const OverlayStatus& status,
+                              std::uint32_t frameIndex);
 
   HWND hwnd_ = nullptr;
   HDC hdc_ = nullptr;
@@ -225,6 +286,20 @@ class GlViewport {
   // overlay checkbox; OnTimer in entry.cpp consumes it.
   bool debugEnabled_ = false;
   bool debugDirty_ = false;
+
+  // v0.16.0-alpha.1 camera attach state. cameraConfig_ is the
+  // authoritative config; cameraDirty_ fires on user edit (UI panel or
+  // viewport drag) so entry.cpp can persist. attachedActive_ /
+  // attachedTargetPos_ are computed each Render() from the current
+  // bone matrix + offset; ApplyCameraTransform reads them to override
+  // the Free camera path. Smoothed position follows targets via the
+  // existing camera-smoothing exp filter, with tau driven by damping.
+  CameraConfig cameraConfig_;
+  bool cameraDirty_ = false;
+  bool attachedActive_ = false;        // bone resolved this frame.
+  float attachedTargetPos_[3] = {0, 0, 0};
+  float attachedTargetYaw_ = 0.0f;     // degrees, used in Match/Yaw modes.
+  float attachedTargetPitch_ = 0.0f;   // degrees, used in Match mode only.
 
   // -------- Input state --------
   POINT lastMousePos_{};

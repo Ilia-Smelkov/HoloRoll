@@ -385,7 +385,15 @@ void GlViewport::UpdateInput(float dtSeconds) {
   if (!hwnd_) return;
 
   int dx = 0, dy = 0;
-  if (flyMouseLook_ || gizmoDragAxis_ >= 0) {
+  // v0.16.0-alpha.1: also capture mouse delta when LMB is pressed in
+  // Attached mode — used to translate the camera offset XY.
+  const bool needsMouseDelta =
+      flyMouseLook_ ||
+      gizmoDragAxis_ >= 0 ||
+      (lmbPressed_ &&
+       cameraConfig_.mode == CameraConfig::Mode::Attached &&
+       attachedActive_);
+  if (needsMouseDelta) {
     POINT mousePos{};
     GetCursorPos(&mousePos);
     dx = mousePos.x - lastMousePos_.x;
@@ -393,17 +401,68 @@ void GlViewport::UpdateInput(float dtSeconds) {
     lastMousePos_ = mousePos;
   }
 
-  if (flyMouseLook_) {
+  // v0.16.0-alpha.1: in Attached mode the camera follows a bone — its
+  // position target is driven by ResolveAttachedTarget, not WASD/mouse.
+  // RMB yaw/pitch is suppressed except in FreeOrbit submode (so Match
+  // and YawOnly modes don't fight bone-derived rotation). LMB drag is
+  // re-interpreted as offset XY translation; wheel as offset Z.
+  // Sets cameraDirty_ on offset edits so entry.cpp persists.
+  const bool attached = attachedActive_;
+  const bool attachedAllowsManualYaw =
+      attached && cameraConfig_.rotMode == CameraConfig::RotMode::FreeOrbit;
+
+  if (attached) {
+    // Position target = smoothed bone+offset (smoothing applied below
+    // via damping-driven alpha).
+    cameraPosTargetX_ = attachedTargetPos_[0];
+    cameraPosTargetY_ = attachedTargetPos_[1];
+    cameraPosTargetZ_ = attachedTargetPos_[2];
+
+    // Rotation target depends on submode:
+    //   Full     - bone yaw + bone pitch.
+    //   YawOnly  - bone yaw, user pitch (mouse RMB blocked in
+    //              this submode for now).
+    //   FreeOrbit- user yaw + user pitch (mouse RMB enabled).
+    if (cameraConfig_.rotMode == CameraConfig::RotMode::Full) {
+      cameraYawTarget_   = attachedTargetYaw_;
+      cameraPitchTarget_ = attachedTargetPitch_;
+    } else if (cameraConfig_.rotMode == CameraConfig::RotMode::YawOnly) {
+      cameraYawTarget_ = attachedTargetYaw_;
+      // Pitch left at its current target — user can adjust through
+      // the existing keybinds; mouse is gated below.
+    }
+    // FreeOrbit: targets untouched, mouse drives them via the normal
+    // flyMouseLook path below.
+
+    // LMB drag → translate offset XY. Scaled so 100px ≈ 1 unit.
+    if (lmbPressed_ && gizmoDragAxis_ < 0 && (dx != 0 || dy != 0)) {
+      cameraConfig_.offsetX += static_cast<float>(dx) * 0.01f;
+      cameraConfig_.offsetY -= static_cast<float>(dy) * 0.01f;  // screen Y inverted.
+      cameraDirty_ = true;
+    }
+    // Wheel → adjust offset Z (depth from bone).
+    if (std::abs(wheelDeltaSteps_) > 0.001f) {
+      cameraConfig_.offsetZ += wheelDeltaSteps_ * 0.1f;
+      cameraDirty_ = true;
+      wheelDeltaSteps_ = 0.0f;
+    }
+  }
+
+  // RMB drag → yaw/pitch (Free, or Attached + FreeOrbit only).
+  if (flyMouseLook_ && (!attached || attachedAllowsManualYaw)) {
     cameraYawTarget_ -= static_cast<float>(dx) * 0.2f;
     cameraPitchTarget_ = std::clamp(cameraPitchTarget_ - static_cast<float>(dy) * 0.2f, -89.0f, 89.0f);
   }
 
-  if (std::abs(wheelDeltaSteps_) > 0.001f) {
+  // Wheel → fly speed (Free mode only; Attached consumed it above).
+  if (!attached && std::abs(wheelDeltaSteps_) > 0.001f) {
     flySpeed_ = std::clamp(flySpeed_ * std::pow(1.15f, wheelDeltaSteps_), 0.05f, 50.0f);
     wheelDeltaSteps_ = 0.0f;
   }
 
-  if (flyMouseLook_) {
+  // WASD movement → position target (Free mode only; Attached locks
+  // position to bone target).
+  if (!attached && flyMouseLook_) {
     auto isDown = [](int vk) {
       return (GetAsyncKeyState(vk) & 0x8000) != 0;
     };
@@ -431,8 +490,11 @@ void GlViewport::UpdateInput(float dtSeconds) {
     cameraPosTargetZ_ += moveZ;
   }
 
-  constexpr float kTau = 0.08f;
-  const float alpha = 1.0f - std::exp(-dtSeconds / kTau);
+  // Smoothing. In Free mode use the existing fixed tau (snappy).
+  // In Attached mode tau is driven by user damping config — 0 =
+  // instant, 1 = ~0.5s settle.
+  const float tau = attached ? std::max(0.001f, cameraConfig_.damping * 0.5f) : 0.08f;
+  const float alpha = 1.0f - std::exp(-dtSeconds / tau);
 
   cameraYaw_   += (cameraYawTarget_   - cameraYaw_)   * alpha;
   cameraPitch_ += (cameraPitchTarget_ - cameraPitch_) * alpha;
@@ -1060,10 +1122,89 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   }
 
   if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::TextDisabled("Hold RMB + WASD/QE to fly. Wheel = speed.");
-    ImGui::SliderFloat("Fly speed", &flySpeed_, 0.05f, 10.0f, "%.2f");
-    if (ImGui::Button("Reset camera")) {
-      ResetCameraToDefault(status);
+    // v0.16.0-alpha.1: mode toggle Free / Attached.
+    //
+    // Free: existing Fly camera (RMB + WASD).
+    // Attached: position locked to a chosen bone's world transform
+    // each frame, rotation controlled by submode (see below). The
+    // camera config is per-animation — entry.cpp persists current
+    // animation's name + this config to holoroll_config.ini.
+    int modeIdx = static_cast<int>(cameraConfig_.mode);
+    const char* modeLabels[] = {"Free", "Attached"};
+    if (ImGui::Combo("Mode##cam", &modeIdx, modeLabels, IM_ARRAYSIZE(modeLabels))) {
+      cameraConfig_.mode = static_cast<CameraConfig::Mode>(modeIdx);
+      cameraDirty_ = true;
+    }
+
+    if (cameraConfig_.mode == CameraConfig::Mode::Free) {
+      ImGui::TextDisabled("Hold RMB + WASD/QE to fly. Wheel = speed.");
+      ImGui::SliderFloat("Fly speed", &flySpeed_, 0.05f, 10.0f, "%.2f");
+      if (ImGui::Button("Reset camera")) {
+        ResetCameraToDefault(status);
+      }
+    } else {
+      // Attached mode — bone picker + offset + rotation submode.
+      if (status.jointNames && !status.jointNames->empty()) {
+        // Build a C-string array for ImGui::Combo from jointNames.
+        // (Static lifetime per draw — vector survives the Combo call.)
+        std::vector<const char*> nameCStrs;
+        nameCStrs.reserve(status.jointNames->size());
+        int currentBoneIdx = -1;
+        for (std::size_t i = 0; i < status.jointNames->size(); ++i) {
+          nameCStrs.push_back((*status.jointNames)[i].c_str());
+          if ((*status.jointNames)[i] == cameraConfig_.boneName) {
+            currentBoneIdx = static_cast<int>(i);
+          }
+        }
+        if (ImGui::Combo("Bone##cam",
+                         &currentBoneIdx,
+                         nameCStrs.data(),
+                         static_cast<int>(nameCStrs.size()))) {
+          if (currentBoneIdx >= 0 &&
+              currentBoneIdx < static_cast<int>(status.jointNames->size())) {
+            cameraConfig_.boneName = (*status.jointNames)[currentBoneIdx];
+            cameraDirty_ = true;
+          }
+        }
+        if (!attachedActive_ && !cameraConfig_.boneName.empty()) {
+          ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                             "Bone '%s' not in current anim — using Free fallback.",
+                             cameraConfig_.boneName.c_str());
+        }
+      } else {
+        ImGui::TextDisabled("Current animation has no skeleton — Attached unavailable.");
+      }
+
+      ImGui::Separator();
+      ImGui::TextDisabled("Offset (camera position relative to bone)");
+      const float kOffRange = 5.0f;
+      if (ImGui::SliderFloat("X##camOff", &cameraConfig_.offsetX, -kOffRange, kOffRange, "%.3f")) cameraDirty_ = true;
+      if (ImGui::SliderFloat("Y##camOff", &cameraConfig_.offsetY, -kOffRange, kOffRange, "%.3f")) cameraDirty_ = true;
+      if (ImGui::SliderFloat("Z##camOff", &cameraConfig_.offsetZ, -kOffRange, kOffRange, "%.3f")) cameraDirty_ = true;
+      if (ImGui::Checkbox("Offset rotates with bone", &cameraConfig_.offsetLocal)) cameraDirty_ = true;
+
+      ImGui::Separator();
+      ImGui::TextDisabled("Rotation");
+      int rotIdx = static_cast<int>(cameraConfig_.rotMode);
+      const char* rotLabels[] = {"Match bone (FPV)", "Yaw only (follow)", "Free orbit"};
+      if (ImGui::Combo("##camRot", &rotIdx, rotLabels, IM_ARRAYSIZE(rotLabels))) {
+        cameraConfig_.rotMode = static_cast<CameraConfig::RotMode>(rotIdx);
+        cameraDirty_ = true;
+      }
+
+      ImGui::Separator();
+      if (ImGui::SliderFloat("Damping##cam", &cameraConfig_.damping, 0.0f, 1.0f, "%.2f")) cameraDirty_ = true;
+
+      ImGui::Separator();
+      ImGui::TextDisabled("LMB drag = offset XY, Wheel = offset Z");
+      if (cameraConfig_.rotMode == CameraConfig::RotMode::FreeOrbit) {
+        ImGui::TextDisabled("RMB drag = orbit around bone");
+      }
+      if (ImGui::Button("Reset to Free")) {
+        cameraConfig_ = CameraConfig{};
+        cameraConfig_.mode = CameraConfig::Mode::Free;
+        cameraDirty_ = true;
+      }
     }
   }
 
@@ -1576,6 +1717,10 @@ void GlViewport::Render(const std::vector<float>& vertices,
   const float dt = lastTickMs_ == 0 ? 0.016f : std::min(0.1f, (now - lastTickMs_) / 1000.0f);
   lastTickMs_ = now;
 
+  // v0.16.0-alpha.1: resolve bone-attached camera target BEFORE UpdateInput
+  // so the smoothing step has the right targets to track.
+  ResolveAttachedTarget(status, frameIndex);
+
   UpdateInput(dt);
 
   RECT rc{};
@@ -1768,4 +1913,98 @@ bool GlViewport::ConsumeDebugDirty() {
   const bool was = debugDirty_;
   debugDirty_ = false;
   return was;
+}
+
+// ---- v0.16.0-alpha.1 camera attach helpers ---------------------------------
+
+void GlViewport::SetCameraConfig(const CameraConfig& cfg) {
+  cameraConfig_ = cfg;
+}
+
+const GlViewport::CameraConfig& GlViewport::GetCameraConfig() const {
+  return cameraConfig_;
+}
+
+bool GlViewport::ConsumeCameraDirty() {
+  const bool was = cameraDirty_;
+  cameraDirty_ = false;
+  return was;
+}
+
+// Resolve the active bone's world matrix at the current frame, then
+// compute camera target position (bone pos + offset, optionally in
+// bone local space) and target yaw/pitch (depending on rot mode).
+// Result lives in attachedActive_ / attachedTargetPos_ /
+// attachedTargetYaw_ / attachedTargetPitch_, consumed by UpdateInput
+// to drive the smoothed camera state.
+//
+// Called once per Render() before UpdateInput. If the configured bone
+// isn't present in the current animation (or no animation is active,
+// or mode == Free), attachedActive_ ends up false and the existing
+// Free camera path runs unchanged.
+void GlViewport::ResolveAttachedTarget(const OverlayStatus& status,
+                                       std::uint32_t frameIndex) {
+  attachedActive_ = false;
+  if (cameraConfig_.mode != CameraConfig::Mode::Attached) return;
+  if (cameraConfig_.boneName.empty()) return;
+  if (!status.jointWorldMatrices || !status.jointNames) return;
+  if (status.jointWorldMatrices->empty()) return;
+
+  // Linear scan over joint names for the configured bone.
+  std::size_t boneIdx = 0;
+  bool found = false;
+  for (std::size_t i = 0; i < status.jointNames->size(); ++i) {
+    if ((*status.jointNames)[i] == cameraConfig_.boneName) {
+      boneIdx = i;
+      found = true;
+      break;
+    }
+  }
+  if (!found) return;
+  if (boneIdx >= status.jointWorldMatrices->size()) return;
+
+  const auto& boneFrames = (*status.jointWorldMatrices)[boneIdx];
+  if (boneFrames.empty()) return;
+  const std::uint32_t f = (frameIndex >= boneFrames.size())
+      ? static_cast<std::uint32_t>(boneFrames.size() - 1)
+      : frameIndex;
+  const auto& M = boneFrames[f];
+
+  // Column-major 4x4. Bone world position = last column translation.
+  const float boneX = M[12];
+  const float boneY = M[13];
+  const float boneZ = M[14];
+
+  // Compute camera target position.
+  if (cameraConfig_.offsetLocal) {
+    // target = M * (offset, 1). Apply rotation+translation to offset.
+    const float ox = cameraConfig_.offsetX;
+    const float oy = cameraConfig_.offsetY;
+    const float oz = cameraConfig_.offsetZ;
+    attachedTargetPos_[0] = M[0]*ox + M[4]*oy + M[8]*oz  + M[12];
+    attachedTargetPos_[1] = M[1]*ox + M[5]*oy + M[9]*oz  + M[13];
+    attachedTargetPos_[2] = M[2]*ox + M[6]*oy + M[10]*oz + M[14];
+  } else {
+    attachedTargetPos_[0] = boneX + cameraConfig_.offsetX;
+    attachedTargetPos_[1] = boneY + cameraConfig_.offsetY;
+    attachedTargetPos_[2] = boneZ + cameraConfig_.offsetZ;
+  }
+
+  // Camera look direction extraction.
+  //
+  // glTF bone "forward" is local -Z. In world space that's
+  // (-M[8], -M[9], -M[10]). Camera Fly convention here is:
+  //   forward = (-sin yaw cos pitch, sin pitch, -cos yaw cos pitch)
+  // Solve:
+  //   yaw   = atan2(M[8], M[10])
+  //   pitch = asin(-M[9])
+  // For identity matrix (M[8]=0, M[9]=0, M[10]=1) → yaw=0, pitch=0
+  // i.e. camera looks down -Z which is the GL default.
+  constexpr float kRad2Deg = 180.0f / 3.14159265358979323846f;
+  const float yawRad   = std::atan2(M[8], M[10]);
+  const float pitchRad = std::asin(std::clamp(-M[9], -1.0f, 1.0f));
+  attachedTargetYaw_   = yawRad   * kRad2Deg;
+  attachedTargetPitch_ = pitchRad * kRad2Deg;
+
+  attachedActive_ = true;
 }

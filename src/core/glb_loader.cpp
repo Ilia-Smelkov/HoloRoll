@@ -762,6 +762,18 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
   // v0.12.0-alpha.2: local motion now computed alongside world motion.
   // See the bake loop below for the per-frame computation.
   localMotion_.assign(jointCount, std::vector<float>(totalFrames_, 0.0f));
+  // v0.16.0-alpha.1: per-joint per-frame world matrix, captured inside
+  // the bake loop alongside motion data. Drives the camera-attach
+  // feature — see gl_viewport.cpp's Attached camera mode. Init to
+  // identity so MDD-style animations (no skeleton, jointCount == 0)
+  // produce an empty outer vector and we never index into uninit data.
+  static constexpr BoneMatrix kIdentityBM = {
+      1.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 0.0f, 1.0f};
+  jointWorldMatrices_.assign(jointCount,
+                              std::vector<BoneMatrix>(totalFrames_, kIdentityBM));
 
   // v0.12.0-alpha.8: instead of tracking only the previous frame, we
   // now store the full per-frame probe trajectory per joint. After the
@@ -860,9 +872,14 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
     }
 
     // Compute skinning matrix per joint: jointWorld * IBM.
+    // v0.16.0-alpha.1: also stash the joint's world matrix for the
+    // camera-attach feature. Same nodeWorld[n] value, just persisted
+    // beyond the per-frame loop so gl_viewport can sample it later.
     for (std::size_t j = 0; j < jointCount; ++j) {
       const int n = skin.joints[j];
       jointSkin[j] = MulM(nodeWorld[n], ibms[j]);
+      // Mat4 == BoneMatrix (both = std::array<float, 16>), direct copy.
+      jointWorldMatrices_[j][f] = nodeWorld[n];
     }
 
     // ---- v0.12.0-alpha.8: capture per-joint probe trajectories ----------

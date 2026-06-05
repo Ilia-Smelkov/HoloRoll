@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -71,6 +73,17 @@ struct LoadedAnimation {
   std::vector<std::vector<float>> localMotion;
   std::vector<std::vector<float>> worldMotion;
 
+  // ---- v0.16.0-alpha.1 camera attach ------------------------------------
+  //
+  // Per-joint per-frame world matrix in glTF model space. Layout:
+  // jointWorldMatrices[boneIdx][frameIdx] — column-major 4x4 float.
+  // Populated from GlbLoader::JointWorldMatrices() at scan time. Empty
+  // for MDD animations (no skeleton). Used by gl_viewport's Attached
+  // camera mode to compute camera position + look direction from a
+  // chosen bone's transform at the current preview frame.
+  using BoneMatrix = std::array<float, 16>;
+  std::vector<std::vector<BoneMatrix>> jointWorldMatrices;
+
   double DurationSeconds(double fps) const;
 
   // Source-agnostic accessors. Always prefer these over poking at
@@ -80,6 +93,19 @@ struct LoadedAnimation {
   const std::vector<float>& VerticesForFrame(std::uint32_t frame) const;
   const std::vector<std::uint32_t>* TriangleIndicesPtr() const;
   bool HasTopology() const;
+
+  // ---- v0.16.0-alpha.1 camera helpers -----------------------------------
+  //
+  // FindBoneByName: case-sensitive linear search over jointNames.
+  // Returns std::nullopt if no bone matches.
+  std::optional<std::size_t> FindBoneByName(const std::string& name) const;
+
+  // GetBoneWorldMatrix: copy bone's world matrix at the given frame into
+  // out[16]. Returns false (and leaves out untouched) if boneIdx is
+  // out of range or jointWorldMatrices is empty (MDD animation). Frame
+  // is clamped to [0, TotalFrames-1] so callers don't need to.
+  bool GetBoneWorldMatrix(std::size_t boneIdx, std::uint32_t frame,
+                           float out[16]) const;
 };
 
 struct TimelineRegion {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -78,6 +79,24 @@ class GlbLoader {
   const std::vector<std::vector<float>>& LocalMotion() const { return localMotion_; }
   const std::vector<std::vector<float>>& WorldMotion() const { return worldMotion_; }
 
+  // ---- v0.16.0-alpha.1 camera attach -----------------------------------
+  //
+  // Per-joint per-frame world matrix in glTF model space. Captured during
+  // the bake pass alongside motion data (it's the same nodeWorld[j][f]
+  // intermediate that drives skinning). Used by the camera-attach feature
+  // to compute the camera basis from a chosen bone — see gl_viewport.cpp.
+  //
+  // Layout: jointWorldMatrices_[boneIdx][frameIdx] is a column-major 4x4
+  // float matrix. boneIdx range is [0, JointNames().size()), frameIdx
+  // range is [0, TotalFrames()).
+  //
+  // Memory cost: ~64 bytes per (bone, frame). For a typical 50-bone,
+  // 1000-frame rig that's ~3 MB per animation — fits comfortably.
+  using BoneMatrix = std::array<float, 16>;
+  const std::vector<std::vector<BoneMatrix>>& JointWorldMatrices() const {
+    return jointWorldMatrices_;
+  }
+
  private:
   bool loaded_ = false;
   std::string lastError_;
@@ -96,4 +115,8 @@ class GlbLoader {
   std::vector<std::string> jointNames_;
   std::vector<std::vector<float>> localMotion_;
   std::vector<std::vector<float>> worldMotion_;
+
+  // v0.16.0-alpha.1: per-joint per-frame world matrix, captured during
+  // bake alongside the motion analysis. Indexed [boneIdx][frameIdx].
+  std::vector<std::vector<BoneMatrix>> jointWorldMatrices_;
 };

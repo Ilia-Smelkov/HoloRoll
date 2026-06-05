@@ -123,6 +123,10 @@ void CopyMotionDataFromGlb(LoadedAnimation& anim) {
   anim.jointNames = anim.glb->JointNames();
   anim.worldMotion = anim.glb->WorldMotion();
   anim.localMotion = anim.glb->LocalMotion();
+  // v0.16.0-alpha.1: camera-attach needs per-joint per-frame world
+  // matrices. GlbLoader captures them inside the same bake loop that
+  // produces motion data; we just copy the storage across.
+  anim.jointWorldMatrices = anim.glb->JointWorldMatrices();
 }
 
 // Format a single-line summary of the top-N most-active joints by total
@@ -248,6 +252,40 @@ const std::vector<std::uint32_t>* LoadedAnimation::TriangleIndicesPtr() const {
 
 bool LoadedAnimation::HasTopology() const {
   return TriangleIndicesPtr() != nullptr;
+}
+
+// v0.16.0-alpha.1: bone lookup by name. Case-sensitive linear scan over
+// jointNames. Returns nullopt if no match, including the (common) case
+// of MDD animations with no skeleton at all.
+std::optional<std::size_t> LoadedAnimation::FindBoneByName(
+    const std::string& name) const {
+  for (std::size_t i = 0; i < jointNames.size(); ++i) {
+    if (jointNames[i] == name) return i;
+  }
+  return std::nullopt;
+}
+
+// v0.16.0-alpha.1: copy bone's world matrix into out[16]. Returns false
+// and leaves `out` untouched if:
+//   - jointWorldMatrices is empty (MDD animation, no skeleton).
+//   - boneIdx is out of range.
+// Frame is clamped to [0, TotalFrames-1] for callers convenience —
+// preview code feeds the resolved frameIndex which is already clamped
+// in ResolvePlayheadFromItems, but defensive clamping costs nothing.
+bool LoadedAnimation::GetBoneWorldMatrix(std::size_t boneIdx,
+                                          std::uint32_t frame,
+                                          float out[16]) const {
+  if (jointWorldMatrices.empty()) return false;
+  if (boneIdx >= jointWorldMatrices.size()) return false;
+  const auto& boneFrames = jointWorldMatrices[boneIdx];
+  if (boneFrames.empty()) return false;
+  const std::uint32_t clamped =
+      (frame >= boneFrames.size())
+          ? static_cast<std::uint32_t>(boneFrames.size() - 1)
+          : frame;
+  const auto& mat = boneFrames[clamped];
+  for (int i = 0; i < 16; ++i) out[i] = mat[i];
+  return true;
 }
 
 // ---- AnimationLibrary -------------------------------------------------------

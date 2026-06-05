@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0-alpha.1] — 2026-06-06
+
+Camera attach: lock the preview camera to a chosen bone, with offset
++ rotation submode + damping. Per-animation persistence.
+
+### Added — camera-attach feature
+
+New "Camera" overlay panel modes:
+- **Free** (default): existing Fly camera, RMB + WASD/QE + wheel.
+- **Attached**: camera position derived from a chosen bone's world
+  transform at the current preview frame. Three rotation sub-modes:
+  - **Match bone (FPV)** — full bone yaw + pitch. True first-person.
+    Subject to motion-sickness if the bone rotates fast.
+  - **Yaw only (follow)** *(default)* — bone yaw + user pitch.
+    Comfortable "third-person follow" feel.
+  - **Free orbit** — user yaw + user pitch, position only locked to
+    bone. RMB drag orbits around the bone.
+
+Offset (X/Y/Z) is the camera position relative to the bone, with a
+checkbox to keep it in bone-local space (rotates with the bone) or
+in world space (fixed direction from the bone).
+
+Damping slider (0..1) controls position smoothing — 0 = instant
+follow, 0.15 = comfortable default, 1 ≈ 0.5s settle time.
+
+### Viewport interactions
+
+- **LMB drag** (Attached, not on gizmo): translate offset XY (screen-
+  aligned). Persisted on release.
+- **Wheel** (Attached): adjust offset Z (depth from bone).
+- **RMB drag** (Attached + FreeOrbit only): yaw/pitch orbit around bone.
+  Suppressed in Match/Yaw modes since bone-derived rotation owns yaw.
+
+### Parser additions
+
+- `GlbLoader::JointWorldMatrices()` — per-joint per-frame world matrix
+  captured during the bake pass alongside motion data. Layout:
+  `[boneIdx][frameIdx]`, column-major float[16]. Memory cost
+  ≈ 64 bytes × bones × frames; typical rig ~3 MB.
+- `LoadedAnimation::jointWorldMatrices` — same shape, copied from
+  GlbLoader. MDD animations (no skeleton) get an empty outer vector.
+- `LoadedAnimation::FindBoneByName(name)` → `std::optional<size_t>`.
+- `LoadedAnimation::GetBoneWorldMatrix(boneIdx, frame, out[16])` →
+  bool with defensive clamping.
+
+### Renderer additions
+
+- `GlViewport::CameraConfig` struct (Mode + boneName + offset + rotMode
+  + damping) + Get/Set/ConsumeCameraDirty API.
+- `OverlayStatus::jointWorldMatrices` + `jointNames` pointers wired by
+  entry.cpp from the active animation each frame.
+- `ResolveAttachedTarget`: bone matrix sampling + yaw/pitch
+  extraction (yaw = atan2(M[8], M[10]); pitch = asin(-M[9])).
+- `UpdateInput`: attached path replaces WASD/RMB position drive with
+  bone target, applies damping-driven smoothing tau.
+
+### Persistence
+
+Per-animation config keys in `holoroll_config.ini`:
+```
+camera.<sanitised_anim_name>.mode = 0|1
+camera.<sanitised_anim_name>.bone_name = string
+camera.<sanitised_anim_name>.offset_x/y/z = float
+camera.<sanitised_anim_name>.offset_local = 0|1
+camera.<sanitised_anim_name>.rot_mode = 0|1|2
+camera.<sanitised_anim_name>.damping = float
+```
+Anim name sanitised by replacing non-alphanumeric/underscore bytes
+with `_`. Load on active-animation switch via OnTimer; save on every
+ConsumeCameraDirty signal.
+
+### Hardcodes (Phase A)
+
+- **Bone forward axis = -Z** (glTF default). Phase B will add a
+  per-bone forward-axis picker for non-standard rigs.
+- Damping affects position only — rotation snaps. Sufficient for
+  Yaw-only follow-cam smoothness; full-rotation slerp damping
+  deferred.
+- "Reset to Free" button restores `CameraConfig{}` defaults (Free
+  mode, offset {0, 0.5, -2}, YawOnly, damping 0.15).
+
+
 ## [0.15.0-alpha.1] — 2026-06-05
 
 First 0.15 release. Bundles the alpha.5-.11 reverse-via-SECTION work
@@ -2463,7 +2545,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.15.0-alpha.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.1...HEAD
+[0.16.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.1
 [0.15.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.15.0-alpha.1
 [0.14.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.11
 [0.14.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.10

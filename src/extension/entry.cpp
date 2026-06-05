@@ -288,6 +288,78 @@ bool HotReloadEnabled() {
   return g_config.GetDouble(kCfgKeyHotReload, 1.0) >= 0.5;
 }
 
+// ---- v0.16.0-alpha.1 camera attach: per-animation persistence -----------
+//
+// Camera config is stored in holoroll_config.ini with namespaced keys:
+//   camera.<sanitized_anim_name>.mode         0|1 (Free|Attached)
+//   camera.<sanitized_anim_name>.bone_name    string
+//   camera.<sanitized_anim_name>.offset_x/y/z float
+//   camera.<sanitized_anim_name>.offset_local 0|1
+//   camera.<sanitized_anim_name>.rot_mode     0|1|2 (Full|YawOnly|FreeOrbit)
+//   camera.<sanitized_anim_name>.damping      float
+//
+// Animation names may contain spaces/non-ASCII; sanitisation replaces any
+// non-alphanumeric/underscore byte with '_' so the resulting key is
+// ini-safe. The original bone_name is stored as-is (it's a value, not a
+// key, so any UTF-8 round-trips fine through ConfigStore).
+std::string SanitizeAnimNameForConfig(const std::string& name) {
+  std::string out;
+  out.reserve(name.size());
+  for (char c : name) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if ((uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z') ||
+        (uc >= '0' && uc <= '9') || c == '_') {
+      out += c;
+    } else {
+      out += '_';
+    }
+  }
+  return out;
+}
+
+GlViewport::CameraConfig LoadCameraConfigForAnim(const std::string& animName) {
+  GlViewport::CameraConfig cfg;  // defaults (Free + sensible offset).
+  const std::string san = SanitizeAnimNameForConfig(animName);
+  if (san.empty()) return cfg;
+  const std::string p = "camera." + san + ".";
+
+  const int modeRaw = static_cast<int>(g_config.GetDouble(p + "mode", 0.0));
+  cfg.mode = (modeRaw == 1) ? GlViewport::CameraConfig::Mode::Attached
+                            : GlViewport::CameraConfig::Mode::Free;
+  cfg.boneName    = g_config.GetString(p + "bone_name", "");
+  cfg.offsetX     = static_cast<float>(g_config.GetDouble(p + "offset_x", 0.0));
+  cfg.offsetY     = static_cast<float>(g_config.GetDouble(p + "offset_y", 0.5));
+  cfg.offsetZ     = static_cast<float>(g_config.GetDouble(p + "offset_z", -2.0));
+  cfg.offsetLocal = g_config.GetDouble(p + "offset_local", 1.0) >= 0.5;
+
+  const int rotRaw = static_cast<int>(g_config.GetDouble(p + "rot_mode", 1.0));  // default YawOnly.
+  switch (rotRaw) {
+    case 0:  cfg.rotMode = GlViewport::CameraConfig::RotMode::Full; break;
+    case 2:  cfg.rotMode = GlViewport::CameraConfig::RotMode::FreeOrbit; break;
+    default: cfg.rotMode = GlViewport::CameraConfig::RotMode::YawOnly; break;
+  }
+  cfg.damping = static_cast<float>(g_config.GetDouble(p + "damping", 0.15));
+  return cfg;
+}
+
+void SaveCameraConfigForAnim(const std::string& animName,
+                              const GlViewport::CameraConfig& cfg) {
+  const std::string san = SanitizeAnimNameForConfig(animName);
+  if (san.empty()) return;
+  const std::string p = "camera." + san + ".";
+
+  g_config.SetDouble(p + "mode",
+                     cfg.mode == GlViewport::CameraConfig::Mode::Attached ? 1.0 : 0.0);
+  g_config.SetString(p + "bone_name",    cfg.boneName);
+  g_config.SetDouble(p + "offset_x",     cfg.offsetX);
+  g_config.SetDouble(p + "offset_y",     cfg.offsetY);
+  g_config.SetDouble(p + "offset_z",     cfg.offsetZ);
+  g_config.SetDouble(p + "offset_local", cfg.offsetLocal ? 1.0 : 0.0);
+  g_config.SetDouble(p + "rot_mode",     static_cast<double>(static_cast<int>(cfg.rotMode)));
+  g_config.SetDouble(p + "damping",      cfg.damping);
+  g_config.Save();
+}
+
 // Apply scene settings from config to the viewport. Called on startup and
 // after `Reload config`.
 void ApplySceneSettingsToViewport() {
@@ -2895,6 +2967,13 @@ void OnTimer() {
     status.autoExtent = anim.autoExtent;
     status.restNormals = &anim.restNormals;
 
+    // v0.16.0-alpha.1: surface bone data so the camera-attach mode in
+    // gl_viewport can sample the right bone's world matrix at the
+    // current frame. Both pointers are null for MDD animations (no
+    // skeleton) — gl_viewport falls back to Free in that case.
+    status.jointWorldMatrices = &anim.jointWorldMatrices;
+    status.jointNames = &anim.jointNames;
+
     // Surface the active item's time range to the overlay (it used to come
     // from regions; items now drive this).
     status.activeRegionStart = itemResult.itemStart;
@@ -2916,6 +2995,10 @@ void OnTimer() {
         g_viewport.ResetCameraToDefault(status);
         g_viewport.CapturePose(target);
       }
+      // v0.16.0-alpha.1: also load camera-attach config for this
+      // animation. Each animation has its own config namespaced by
+      // sanitised basename in holoroll_config.ini.
+      g_viewport.SetCameraConfig(LoadCameraConfigForAnim(anim.basename));
       g_activeAnimIdx = animIdx;
     }
   }
@@ -2925,6 +3008,14 @@ void OnTimer() {
   if (g_activeAnimIdx != kNoActiveAnim) {
     ViewportPose& live = g_poses.Get(g_activeAnimIdx);
     g_viewport.CapturePose(live);
+
+    // v0.16.0-alpha.1: persist camera config on user edits. ConsumeCameraDirty
+    // returns true at most once per actual change (UI panel edit or LMB/wheel
+    // drag); cheap when nothing changed.
+    if (g_viewport.ConsumeCameraDirty()) {
+      const LoadedAnimation& activeAnim = g_lib.At(g_activeAnimIdx);
+      SaveCameraConfigForAnim(activeAnim.basename, g_viewport.GetCameraConfig());
+    }
   }
 
   // Throttle scene-setting persistence: only check & write at most once per
