@@ -84,6 +84,12 @@ struct LoadedAnimation {
   using BoneMatrix = std::array<float, 16>;
   std::vector<std::vector<BoneMatrix>> jointWorldMatrices;
 
+  // v0.16.0-alpha.2: parent joint indices for skeleton visualisation.
+  // jointParents[j] = -1 means no parent (skeleton root); otherwise
+  // an index into jointNames / jointWorldMatrices. Used by gl_viewport
+  // to render bone-to-parent line segments.
+  std::vector<int> jointParents;
+
   double DurationSeconds(double fps) const;
 
   // Source-agnostic accessors. Always prefer these over poking at

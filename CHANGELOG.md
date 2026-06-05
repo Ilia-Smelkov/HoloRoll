@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0-alpha.3] — 2026-06-06
+
+Camera attach micro-fixes per feedback: WASD world-alignment in
+Attached mode, bone-hover tooltip, one-button transform reset.
+
+### Fixed
+- **WASD directions now world-aligned in Attached mode.** alpha.2's
+  Attached path added the world-space WASD delta directly to
+  `offset`, but the resolver re-rotated the offset through bone +
+  object rotations, so the camera's actual world displacement came
+  out skewed. alpha.3 pre-multiplies the delta by the inverse of
+  those rotations before adding to offset, so pressing W moves the
+  camera in the true world-forward direction regardless of bone
+  orientation or object yaw/pitch/roll.
+  Implementation: store the bone's raw world matrix in
+  `attachedBoneMatrix_` during `ResolveAttachedTarget`; in
+  `UpdateInput`'s WASD branch, apply `R(-roll, Z) · R(-pitch, X) ·
+  R(-yaw, Y)` to undo object rotation, then (if `offsetLocal`)
+  multiply by the 3x3 transpose of the bone matrix.
+
+### Added
+- **Bone-hover tooltip.** While `Show skeleton` is on, hovering the
+  mouse near a joint dot pops up an ImGui tooltip with the joint
+  name. Implementation: `DrawSkeleton` projects each joint to
+  viewport pixel coordinates (manual MVP project from `matModelView_`
+  + `matProjection_`); `DrawOverlay` finds the closest joint within
+  25 px and shows the name. Skipped when ImGui owns the mouse.
+- **Hint** "Hover a joint dot to see its name" under the `Show
+  skeleton` checkbox when it's enabled.
+- **"Reset all transforms" button** in the Object overlay section.
+  Zeros object yaw/pitch/roll AND pivot offset in one click. The
+  existing per-section reset buttons stay.
+
+
+## [0.16.0-alpha.2] — 2026-06-06
+
+Camera attach feedback pass: offset alignment fix, simplified mode
+matrix, skeleton + spring-arm visualisation.
+
+### Fixed
+- **Offset alignment with object rotation.** alpha.1 computed camera
+  target in raw model space, but the rendered mesh is also rotated
+  around pivot by objectYaw/Pitch/Roll (Object overlay section).
+  When the user had non-zero object rotation or pivot offset, camera
+  ended up displaced from where the bone visually appears.
+  ResolveAttachedTarget now applies the same
+  `T(pivot) * R(yaw,Y) * R(pitch,X) * R(roll,Z) * T(-pivot)` transform
+  to the target position (and also to the bone's own rendered
+  position used by the spring-arm visualisation).
+
+### Changed — simplified Attached mode
+- **Removed rotation submodes** (Match bone / Yaw only / Free orbit).
+  User feedback was that bone-derived rotation made offset tuning
+  confusing — the only sub-mode that actually helped review was
+  "FreeOrbit". alpha.2 keeps Attached behaviour as: position locked
+  to bone+offset, everything else mirrors Free mode (RMB rotates,
+  WASD edits offset in camera-local axes, wheel = fly speed).
+- **WASD in Attached now edits the offset** instead of moving an
+  unattached camera position. Naturally tunes spring-arm placement:
+  fly to where you want the camera, position sticks.
+- **LMB drag for offset XY removed** — WASD covers this more
+  naturally. LMB is back to gizmo-only.
+- **Wheel in Attached = fly speed** (was: offset Z). Matches Free
+  mode behaviour.
+- Old `camera.<anim>.rot_mode` config key dropped from schema. Pre-
+  alpha.2 configs with this key still work; the value is ignored on
+  read and not written back.
+
+### Added — skeleton + spring-arm visualisation
+- **Show skeleton** checkbox in Camera overlay section.
+- When on:
+  - Joint dots (bright yellow points) at every bone position.
+  - Bone segments (yellow lines) connecting each child joint to its
+    parent.
+  - Drawn on top of mesh (depth test disabled) so visible through the
+    body — debug aid for picking the right bone.
+- Additionally when in Attached mode:
+  - **Dashed cyan line** ("spring arm") from camera to attach anchor.
+  - **Cyan dot** at the attach anchor (bone position before offset).
+  - **Coral dot** at the camera position (where the camera technically
+    sits in world).
+- Toggle persisted globally as `viewport.show_skeleton` in
+  holoroll_config.ini.
+
+### Parser additions
+- `GlbLoader::JointParents()` accessor returning per-joint parent
+  indices (joint-level, not node-level — `-1` for skeleton root).
+  Built at bake time by translating the existing node-parent array
+  through `skin.joints[]`.
+- `LoadedAnimation::jointParents` field, copied from glb_loader.
+- `OverlayStatus::jointParents` pointer — null for MDD-style
+  animations without a skeleton.
+
+
 ## [0.16.0-alpha.1] — 2026-06-06
 
 Camera attach: lock the preview camera to a chosen bone, with offset
@@ -2545,7 +2639,9 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.1...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.3...HEAD
+[0.16.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.3
+[0.16.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.2
 [0.16.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.1
 [0.15.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.15.0-alpha.1
 [0.14.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.11

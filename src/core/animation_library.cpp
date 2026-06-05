@@ -127,6 +127,8 @@ void CopyMotionDataFromGlb(LoadedAnimation& anim) {
   // matrices. GlbLoader captures them inside the same bake loop that
   // produces motion data; we just copy the storage across.
   anim.jointWorldMatrices = anim.glb->JointWorldMatrices();
+  // v0.16.0-alpha.2: parent joint indices for skeleton-viz.
+  anim.jointParents = anim.glb->JointParents();
 }
 
 // Format a single-line summary of the top-N most-active joints by total

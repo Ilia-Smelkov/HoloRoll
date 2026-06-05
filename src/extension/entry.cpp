@@ -100,6 +100,9 @@ constexpr char kCfgKeyHotReload[] = "hot_reload.enabled";
 constexpr char kCfgKeySceneShowGround[] = "scene.show_ground_plane";
 constexpr char kCfgKeySceneRadius[]     = "scene.ground_radius";
 constexpr char kCfgKeySceneGridStep[]   = "scene.grid_step";
+// v0.16.0-alpha.2: skeleton-viz toggle. Global (not per-anim) — debug
+// aid that the user toggles ad-hoc.
+constexpr char kCfgKeyShowSkeleton[]    = "viewport.show_skeleton";
 // v0.10.0 scale-awareness toggles. All default off-by-default for clean
 // install except bbox dimensions and grid labels which are visually subtle
 // enough that turning them on by default helps new users orient.
@@ -244,6 +247,7 @@ void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeyGap)) g_config.SetDouble(kCfgKeyGap, kDefaultGapSeconds);
   if (!g_config.Has(kCfgKeyRegionPrefix)) g_config.SetString(kCfgKeyRegionPrefix, "");
   if (!g_config.Has(kCfgKeyHotReload)) g_config.SetDouble(kCfgKeyHotReload, 1.0);
+  if (!g_config.Has(kCfgKeyShowSkeleton))    g_config.SetDouble(kCfgKeyShowSkeleton, 0.0);
   if (!g_config.Has(kCfgKeySceneShowGround)) g_config.SetDouble(kCfgKeySceneShowGround, 1.0);
   if (!g_config.Has(kCfgKeySceneRadius))     g_config.SetDouble(kCfgKeySceneRadius, 20.0);
   if (!g_config.Has(kCfgKeySceneGridStep))   g_config.SetDouble(kCfgKeySceneGridStep, 1.0);
@@ -295,8 +299,12 @@ bool HotReloadEnabled() {
 //   camera.<sanitized_anim_name>.bone_name    string
 //   camera.<sanitized_anim_name>.offset_x/y/z float
 //   camera.<sanitized_anim_name>.offset_local 0|1
-//   camera.<sanitized_anim_name>.rot_mode     0|1|2 (Full|YawOnly|FreeOrbit)
 //   camera.<sanitized_anim_name>.damping      float
+//
+// alpha.2 dropped the per-anim rot_mode field (Match/YawOnly/FreeOrbit
+// submodes were removed — only the FreeOrbit-style behaviour stayed
+// since it's the only one useful for offset tuning). Old config keys
+// `camera.<n>.rot_mode` left in place are harmlessly ignored.
 //
 // Animation names may contain spaces/non-ASCII; sanitisation replaces any
 // non-alphanumeric/underscore byte with '_' so the resulting key is
@@ -332,12 +340,8 @@ GlViewport::CameraConfig LoadCameraConfigForAnim(const std::string& animName) {
   cfg.offsetZ     = static_cast<float>(g_config.GetDouble(p + "offset_z", -2.0));
   cfg.offsetLocal = g_config.GetDouble(p + "offset_local", 1.0) >= 0.5;
 
-  const int rotRaw = static_cast<int>(g_config.GetDouble(p + "rot_mode", 1.0));  // default YawOnly.
-  switch (rotRaw) {
-    case 0:  cfg.rotMode = GlViewport::CameraConfig::RotMode::Full; break;
-    case 2:  cfg.rotMode = GlViewport::CameraConfig::RotMode::FreeOrbit; break;
-    default: cfg.rotMode = GlViewport::CameraConfig::RotMode::YawOnly; break;
-  }
+  // alpha.2: rot_mode dropped from the schema. Old configs may still
+  // have the key but we ignore it.
   cfg.damping = static_cast<float>(g_config.GetDouble(p + "damping", 0.15));
   return cfg;
 }
@@ -355,7 +359,7 @@ void SaveCameraConfigForAnim(const std::string& animName,
   g_config.SetDouble(p + "offset_y",     cfg.offsetY);
   g_config.SetDouble(p + "offset_z",     cfg.offsetZ);
   g_config.SetDouble(p + "offset_local", cfg.offsetLocal ? 1.0 : 0.0);
-  g_config.SetDouble(p + "rot_mode",     static_cast<double>(static_cast<int>(cfg.rotMode)));
+  // alpha.2: rot_mode no longer written.
   g_config.SetDouble(p + "damping",      cfg.damping);
   g_config.Save();
 }
@@ -370,6 +374,8 @@ void ApplySceneSettingsToViewport() {
   const bool labels   = g_config.GetDouble(kCfgKeySceneShowGridLabels, 1.0) >= 0.5;
   const bool refHuman = g_config.GetDouble(kCfgKeySceneShowRefHuman, 1.0) >= 0.5;
   g_viewport.SetSceneSettings(show, radius, gridStep, bbox, labels, refHuman);
+  // v0.16.0-alpha.2: also re-apply the global skeleton-viz toggle.
+  g_viewport.SetSkeletonVisible(g_config.GetDouble(kCfgKeyShowSkeleton, 0.0) >= 0.5);
 }
 
 // Pull current scene state from viewport and write it into the config + disk.
@@ -2971,8 +2977,10 @@ void OnTimer() {
     // gl_viewport can sample the right bone's world matrix at the
     // current frame. Both pointers are null for MDD animations (no
     // skeleton) — gl_viewport falls back to Free in that case.
+    // v0.16.0-alpha.2: also surface parent indices for skeleton viz.
     status.jointWorldMatrices = &anim.jointWorldMatrices;
     status.jointNames = &anim.jointNames;
+    status.jointParents = &anim.jointParents;
 
     // Surface the active item's time range to the overlay (it used to come
     // from regions; items now drive this).
@@ -3033,6 +3041,12 @@ void OnTimer() {
     // v0.12.0-alpha.13: debug flag round-trip. Same debounce window.
     if (g_viewport.ConsumeDebugDirty()) {
       PersistDebugFlagFromViewport();
+    }
+    // v0.16.0-alpha.2: skeleton-viz toggle persistence.
+    if (g_viewport.ConsumeSkeletonDirty()) {
+      g_config.SetDouble(kCfgKeyShowSkeleton,
+                         g_viewport.GetSkeletonVisible() ? 1.0 : 0.0);
+      g_config.Save();
     }
     lastSceneSaveTick = nowTicks;
   }

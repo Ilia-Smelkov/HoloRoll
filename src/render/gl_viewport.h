@@ -16,27 +16,31 @@ class GlViewport {
     Solid = 2,
   };
 
-  // v0.16.0-alpha.1 camera attach.
+  // v0.16.0-alpha.2 camera attach (simplified from alpha.1).
   //
-  // Two modes: Free (existing Fly camera, WASD + RMB mouse look) and
-  // Attached (camera position derived from a chosen bone's world
-  // transform per frame). Attached splits further into three rotation
-  // sub-modes — see RotMode.
+  // Two modes:
+  //   Free      - existing Fly camera (WASD + RMB mouse look).
+  //   Attached  - same Fly controls, but camera POSITION is locked to
+  //               a chosen bone's world transform + offset (smoothed
+  //               via damping). User still rotates view freely with
+  //               RMB. WASD modifies the offset in camera-local axes
+  //               (so flying around tunes the camera placement). When
+  //               the bone moves the camera rides along.
   //
-  // boneName is matched against LoadedAnimation::jointNames at render
-  // time; if the current animation doesn't have a bone by that name we
-  // fall back to Free. Empty boneName == no attach configured.
+  // The three "rotation submodes" from alpha.1 (Match bone / Yaw only
+  // / Free orbit) were removed in alpha.2 — they made offset tuning
+  // confusing and the FreeOrbit case is the only one that's actually
+  // useful for animation review.
   //
-  // offset is the camera's position relative to the bone. If
-  // offsetLocal is true, the offset is in the bone's local space
-  // (rotates with the bone); otherwise it's in world space.
+  // boneName matched against LoadedAnimation::jointNames at render
+  // time; missing bone → fallback to Free behaviour for that frame.
   //
-  // damping smooths position changes. 0 = instant follow, 1 = heavy
-  // smoothing (≈0.5s settle time). Default 0.15 ≈ comfortable
-  // follow-cam feel.
+  // offsetLocal=true means offset rotates with the bone (offset in
+  // bone-local space). false means offset is fixed in model space.
+  //
+  // damping smooths position changes. 0 = instant, 1 ≈ 0.5s settle.
   struct CameraConfig {
     enum class Mode { Free, Attached };
-    enum class RotMode { Full, YawOnly, FreeOrbit };
 
     Mode mode = Mode::Free;
     std::string boneName;
@@ -44,7 +48,6 @@ class GlViewport {
     float offsetY = 0.5f;
     float offsetZ = -2.0f;
     bool offsetLocal = true;
-    RotMode rotMode = RotMode::YawOnly;
     float damping = 0.15f;
   };
 
@@ -99,6 +102,13 @@ class GlViewport {
     using BoneMatrix = std::array<float, 16>;
     const std::vector<std::vector<BoneMatrix>>* jointWorldMatrices = nullptr;
     const std::vector<std::string>* jointNames = nullptr;
+
+    // v0.16.0-alpha.2: parent joint indices for skeleton visualisation
+    // (DrawSkeleton renders joint dots + bone-to-parent lines, +
+    // spring-arm dashes from camera to attach point when Attached).
+    // -1 in a slot means "no parent" (root). Null pointer = no
+    // skeleton info available (MDD or no anim).
+    const std::vector<int>* jointParents = nullptr;
   };
 
   struct OverlayRequests {
@@ -193,6 +203,16 @@ class GlViewport {
   const CameraConfig& GetCameraConfig() const;
   bool ConsumeCameraDirty();
 
+  // ---- v0.16.0-alpha.2 skeleton visualisation ---------------------------
+  // Global toggle (persisted to viewport.show_skeleton in config). When
+  // on, DrawScene renders joint dots + bone-to-parent lines on top of
+  // the mesh, plus a spring-arm dashed line from the camera to the
+  // attach point when Attached mode is active. Debug aid for offset
+  // tuning + bone selection.
+  void SetSkeletonVisible(bool visible);
+  bool GetSkeletonVisible() const;
+  bool ConsumeSkeletonDirty();
+
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   bool CreateContext();
@@ -219,11 +239,20 @@ class GlViewport {
   // Returns: 0 if no choice was made this frame, 1 = Place all, 2 = Skip.
   int DrawNewAnimationsModal(const std::vector<std::string>& pending);
 
-  // v0.16.0-alpha.1: compute attachedTargetPos_/Yaw_/Pitch_ from the
-  // configured bone + offset + current frame. attachedActive_ ends up
-  // false if no bone resolved (Free mode, missing bone, MDD anim).
+  // v0.16.0-alpha.1: compute attachedTargetPos_ from the configured
+  // bone + offset + current frame, applying the same object-rotation
+  // transform that the mesh gets in DrawScene so the camera lands at
+  // the rendered bone position. attachedActive_ ends up false if no
+  // bone resolved (Free mode, missing bone, MDD anim).
   void ResolveAttachedTarget(const OverlayStatus& status,
                               std::uint32_t frameIndex);
+
+  // v0.16.0-alpha.2: render joint dots + bone-to-parent lines on top
+  // of the mesh. When Attached mode is active, also draws a dashed
+  // line ("spring arm") from the smoothed camera position to the
+  // attach anchor, plus a marker at the anchor itself. Called from
+  // DrawScene after the mesh draw so the lines render in front.
+  void DrawSkeleton(const OverlayStatus& status, std::uint32_t frameIndex);
 
   HWND hwnd_ = nullptr;
   HDC hdc_ = nullptr;
@@ -287,19 +316,37 @@ class GlViewport {
   bool debugEnabled_ = false;
   bool debugDirty_ = false;
 
-  // v0.16.0-alpha.1 camera attach state. cameraConfig_ is the
+  // v0.16.0-alpha.1/.2 camera attach state. cameraConfig_ is the
   // authoritative config; cameraDirty_ fires on user edit (UI panel or
-  // viewport drag) so entry.cpp can persist. attachedActive_ /
-  // attachedTargetPos_ are computed each Render() from the current
-  // bone matrix + offset; ApplyCameraTransform reads them to override
-  // the Free camera path. Smoothed position follows targets via the
-  // existing camera-smoothing exp filter, with tau driven by damping.
+  // viewport-relative WASD adjusting offset). attachedActive_ /
+  // attachedTargetPos_ are computed each Render() from the bone matrix
+  // + offset, then transformed through the model-rotation
+  // (objectYaw/Pitch/Roll around pivot) so the camera lands at the
+  // RENDERED bone position. UpdateInput drives the smoothed camera
+  // position toward this target with damping-controlled tau.
   CameraConfig cameraConfig_;
   bool cameraDirty_ = false;
   bool attachedActive_ = false;        // bone resolved this frame.
   float attachedTargetPos_[3] = {0, 0, 0};
-  float attachedTargetYaw_ = 0.0f;     // degrees, used in Match/Yaw modes.
-  float attachedTargetPitch_ = 0.0f;   // degrees, used in Match mode only.
+  // Bone world position (without offset) in rendered space — used by
+  // DrawSpringArm to mark the attach anchor and connect a dashed line.
+  float attachedBoneRenderedPos_[3] = {0, 0, 0};
+
+  // v0.16.0-alpha.3: store the bone's raw world matrix at the current
+  // frame so UpdateInput can inverse-transform WASD deltas back into
+  // offset-frame (otherwise WASD directions appear "skewed" because
+  // the offset is interpreted through bone+object rotations).
+  float attachedBoneMatrix_[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+
+  // v0.16.0-alpha.2 skeleton visualisation.
+  bool showSkeleton_ = false;
+  bool skeletonDirty_ = false;
+
+  // v0.16.0-alpha.3: per-frame projected joint positions in viewport
+  // pixel coordinates. Populated by DrawSkeleton; consumed by the
+  // tooltip in DrawOverlay. Empty (cleared) when showSkeleton_ is off
+  // or no animation is active. Index matches jointNames[] order.
+  std::vector<std::array<float, 2>> jointScreenPos_;
 
   // -------- Input state --------
   POINT lastMousePos_{};

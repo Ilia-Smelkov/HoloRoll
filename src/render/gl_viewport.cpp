@@ -385,15 +385,7 @@ void GlViewport::UpdateInput(float dtSeconds) {
   if (!hwnd_) return;
 
   int dx = 0, dy = 0;
-  // v0.16.0-alpha.1: also capture mouse delta when LMB is pressed in
-  // Attached mode — used to translate the camera offset XY.
-  const bool needsMouseDelta =
-      flyMouseLook_ ||
-      gizmoDragAxis_ >= 0 ||
-      (lmbPressed_ &&
-       cameraConfig_.mode == CameraConfig::Mode::Attached &&
-       attachedActive_);
-  if (needsMouseDelta) {
+  if (flyMouseLook_ || gizmoDragAxis_ >= 0) {
     POINT mousePos{};
     GetCursorPos(&mousePos);
     dx = mousePos.x - lastMousePos_.x;
@@ -401,68 +393,40 @@ void GlViewport::UpdateInput(float dtSeconds) {
     lastMousePos_ = mousePos;
   }
 
-  // v0.16.0-alpha.1: in Attached mode the camera follows a bone — its
-  // position target is driven by ResolveAttachedTarget, not WASD/mouse.
-  // RMB yaw/pitch is suppressed except in FreeOrbit submode (so Match
-  // and YawOnly modes don't fight bone-derived rotation). LMB drag is
-  // re-interpreted as offset XY translation; wheel as offset Z.
-  // Sets cameraDirty_ on offset edits so entry.cpp persists.
+  // v0.16.0-alpha.2: in Attached mode the camera POSITION is locked to
+  // the bone target (smoothed by damping). Everything else mirrors
+  // Free: RMB drag rotates view, wheel adjusts fly speed, WASD
+  // movement is re-interpreted as OFFSET editing in camera-local
+  // axes (so flying around naturally tunes the offset). LMB drag is
+  // no longer special (WASD covers offset adjustment more naturally).
+  //
+  // RotMode submodes from alpha.1 (Match/YawOnly/FreeOrbit) are gone;
+  // user feedback was that bone-derived rotation made offset tuning
+  // confusing. alpha.2 keeps things simple: rotation is always free.
   const bool attached = attachedActive_;
-  const bool attachedAllowsManualYaw =
-      attached && cameraConfig_.rotMode == CameraConfig::RotMode::FreeOrbit;
 
   if (attached) {
-    // Position target = smoothed bone+offset (smoothing applied below
-    // via damping-driven alpha).
     cameraPosTargetX_ = attachedTargetPos_[0];
     cameraPosTargetY_ = attachedTargetPos_[1];
     cameraPosTargetZ_ = attachedTargetPos_[2];
-
-    // Rotation target depends on submode:
-    //   Full     - bone yaw + bone pitch.
-    //   YawOnly  - bone yaw, user pitch (mouse RMB blocked in
-    //              this submode for now).
-    //   FreeOrbit- user yaw + user pitch (mouse RMB enabled).
-    if (cameraConfig_.rotMode == CameraConfig::RotMode::Full) {
-      cameraYawTarget_   = attachedTargetYaw_;
-      cameraPitchTarget_ = attachedTargetPitch_;
-    } else if (cameraConfig_.rotMode == CameraConfig::RotMode::YawOnly) {
-      cameraYawTarget_ = attachedTargetYaw_;
-      // Pitch left at its current target — user can adjust through
-      // the existing keybinds; mouse is gated below.
-    }
-    // FreeOrbit: targets untouched, mouse drives them via the normal
-    // flyMouseLook path below.
-
-    // LMB drag → translate offset XY. Scaled so 100px ≈ 1 unit.
-    if (lmbPressed_ && gizmoDragAxis_ < 0 && (dx != 0 || dy != 0)) {
-      cameraConfig_.offsetX += static_cast<float>(dx) * 0.01f;
-      cameraConfig_.offsetY -= static_cast<float>(dy) * 0.01f;  // screen Y inverted.
-      cameraDirty_ = true;
-    }
-    // Wheel → adjust offset Z (depth from bone).
-    if (std::abs(wheelDeltaSteps_) > 0.001f) {
-      cameraConfig_.offsetZ += wheelDeltaSteps_ * 0.1f;
-      cameraDirty_ = true;
-      wheelDeltaSteps_ = 0.0f;
-    }
   }
 
-  // RMB drag → yaw/pitch (Free, or Attached + FreeOrbit only).
-  if (flyMouseLook_ && (!attached || attachedAllowsManualYaw)) {
+  // RMB drag → yaw/pitch (unconditional — Free or Attached).
+  if (flyMouseLook_) {
     cameraYawTarget_ -= static_cast<float>(dx) * 0.2f;
     cameraPitchTarget_ = std::clamp(cameraPitchTarget_ - static_cast<float>(dy) * 0.2f, -89.0f, 89.0f);
   }
 
-  // Wheel → fly speed (Free mode only; Attached consumed it above).
-  if (!attached && std::abs(wheelDeltaSteps_) > 0.001f) {
+  // Wheel → fly speed (unconditional).
+  if (std::abs(wheelDeltaSteps_) > 0.001f) {
     flySpeed_ = std::clamp(flySpeed_ * std::pow(1.15f, wheelDeltaSteps_), 0.05f, 50.0f);
     wheelDeltaSteps_ = 0.0f;
   }
 
-  // WASD movement → position target (Free mode only; Attached locks
-  // position to bone target).
-  if (!attached && flyMouseLook_) {
+  // WASD movement: in Free mode drives the camera position target; in
+  // Attached mode drives the offset (so the user can fly to where
+  // they want the camera relative to the bone and it persists).
+  if (flyMouseLook_) {
     auto isDown = [](int vk) {
       return (GetAsyncKeyState(vk) & 0x8000) != 0;
     };
@@ -485,9 +449,66 @@ void GlViewport::UpdateInput(float dtSeconds) {
     if (isDown('E')) { moveY += speed; }
     if (isDown('Q')) { moveY -= speed; }
 
-    cameraPosTargetX_ += moveX;
-    cameraPosTargetY_ += moveY;
-    cameraPosTargetZ_ += moveZ;
+    const bool anyMove = (std::abs(moveX) + std::abs(moveY) + std::abs(moveZ)) > 1e-6f;
+    if (anyMove) {
+      if (attached) {
+        // v0.16.0-alpha.3: world-aligned WASD direction. moveX/Y/Z is
+        // currently in WORLD space (forward/right axes from current
+        // camera yaw/pitch). When we add it to offset directly, the
+        // resolver re-rotates the result through bone + object
+        // rotation, so the camera's actual world displacement ends up
+        // skewed. To get true world-aligned motion we INVERSE-transform
+        // the delta through those rotations before adding to offset.
+        //
+        // Forward path (resolver): offset → M*offset → ObjectRot*that.
+        // Inverse:                 delta_world → ObjectRot^-1 → M^-1.
+        // For orthonormal M, M^-1's 3x3 part is M's 3x3 transpose.
+        float dx = moveX, dy = moveY, dz = moveZ;
+
+        // Step A: undo object rotation (Y * X * Z order → inverse is
+        // Z(-roll) * X(-pitch) * Y(-yaw) applied in reverse).
+        const float ya = -objectYaw_   * kDeg2Rad;
+        const float pa = -objectPitch_ * kDeg2Rad;
+        const float ra = -objectRoll_  * kDeg2Rad;
+        {
+          const float cr = std::cos(ra), sr = std::sin(ra);
+          const float nx = cr * dx - sr * dy;
+          const float ny = sr * dx + cr * dy;
+          dx = nx; dy = ny;
+        }
+        {
+          const float cp = std::cos(pa), sp = std::sin(pa);
+          const float ny = cp * dy - sp * dz;
+          const float nz = sp * dy + cp * dz;
+          dy = ny; dz = nz;
+        }
+        {
+          const float cy = std::cos(ya), sy = std::sin(ya);
+          const float nx =  cy * dx + sy * dz;
+          const float nz = -sy * dx + cy * dz;
+          dx = nx; dz = nz;
+        }
+
+        // Step B: if offsetLocal, undo bone rotation via 3x3 transpose
+        // of attachedBoneMatrix_ (column-major).
+        if (cameraConfig_.offsetLocal) {
+          const auto& M = attachedBoneMatrix_;
+          const float ox = M[0]*dx + M[1]*dy + M[2]*dz;
+          const float oy = M[4]*dx + M[5]*dy + M[6]*dz;
+          const float oz = M[8]*dx + M[9]*dy + M[10]*dz;
+          dx = ox; dy = oy; dz = oz;
+        }
+
+        cameraConfig_.offsetX += dx;
+        cameraConfig_.offsetY += dy;
+        cameraConfig_.offsetZ += dz;
+        cameraDirty_ = true;
+      } else {
+        cameraPosTargetX_ += moveX;
+        cameraPosTargetY_ += moveY;
+        cameraPosTargetZ_ += moveZ;
+      }
+    }
   }
 
   // Smoothing. In Free mode use the existing fixed tau (snappy).
@@ -1122,18 +1143,31 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   }
 
   if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
-    // v0.16.0-alpha.1: mode toggle Free / Attached.
+    // v0.16.0-alpha.2: simplified Free / Attached split.
     //
-    // Free: existing Fly camera (RMB + WASD).
-    // Attached: position locked to a chosen bone's world transform
-    // each frame, rotation controlled by submode (see below). The
-    // camera config is per-animation — entry.cpp persists current
-    // animation's name + this config to holoroll_config.ini.
+    // Free:     existing Fly camera (RMB + WASD + wheel).
+    // Attached: identical controls, but camera POSITION is locked to
+    //           the chosen bone's world transform + offset. WASD
+    //           edits the offset (camera-local axes) so you can fly
+    //           around the bone to tune the spring-arm placement;
+    //           RMB rotates view freely; wheel adjusts fly speed.
     int modeIdx = static_cast<int>(cameraConfig_.mode);
     const char* modeLabels[] = {"Free", "Attached"};
     if (ImGui::Combo("Mode##cam", &modeIdx, modeLabels, IM_ARRAYSIZE(modeLabels))) {
       cameraConfig_.mode = static_cast<CameraConfig::Mode>(modeIdx);
       cameraDirty_ = true;
+    }
+
+    // Global "Show skeleton" toggle — debug aid for picking the right
+    // bone. Renders joint dots + bone-to-parent lines + (in Attached)
+    // a dashed spring-arm line from camera to attach anchor.
+    bool showSkel = showSkeleton_;
+    if (ImGui::Checkbox("Show skeleton", &showSkel)) {
+      showSkeleton_ = showSkel;
+      skeletonDirty_ = true;
+    }
+    if (showSkeleton_) {
+      ImGui::TextDisabled("  Hover a joint dot to see its name");
     }
 
     if (cameraConfig_.mode == CameraConfig::Mode::Free) {
@@ -1143,10 +1177,8 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
         ResetCameraToDefault(status);
       }
     } else {
-      // Attached mode — bone picker + offset + rotation submode.
+      // Attached mode — bone picker + offset + damping.
       if (status.jointNames && !status.jointNames->empty()) {
-        // Build a C-string array for ImGui::Combo from jointNames.
-        // (Static lifetime per draw — vector survives the Combo call.)
         std::vector<const char*> nameCStrs;
         nameCStrs.reserve(status.jointNames->size());
         int currentBoneIdx = -1;
@@ -1168,7 +1200,7 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
         }
         if (!attachedActive_ && !cameraConfig_.boneName.empty()) {
           ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
-                             "Bone '%s' not in current anim — using Free fallback.",
+                             "Bone '%s' not in current anim — Free fallback.",
                              cameraConfig_.boneName.c_str());
         }
       } else {
@@ -1176,7 +1208,7 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
       }
 
       ImGui::Separator();
-      ImGui::TextDisabled("Offset (camera position relative to bone)");
+      ImGui::TextDisabled("Offset (camera relative to bone)");
       const float kOffRange = 5.0f;
       if (ImGui::SliderFloat("X##camOff", &cameraConfig_.offsetX, -kOffRange, kOffRange, "%.3f")) cameraDirty_ = true;
       if (ImGui::SliderFloat("Y##camOff", &cameraConfig_.offsetY, -kOffRange, kOffRange, "%.3f")) cameraDirty_ = true;
@@ -1184,25 +1216,15 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
       if (ImGui::Checkbox("Offset rotates with bone", &cameraConfig_.offsetLocal)) cameraDirty_ = true;
 
       ImGui::Separator();
-      ImGui::TextDisabled("Rotation");
-      int rotIdx = static_cast<int>(cameraConfig_.rotMode);
-      const char* rotLabels[] = {"Match bone (FPV)", "Yaw only (follow)", "Free orbit"};
-      if (ImGui::Combo("##camRot", &rotIdx, rotLabels, IM_ARRAYSIZE(rotLabels))) {
-        cameraConfig_.rotMode = static_cast<CameraConfig::RotMode>(rotIdx);
-        cameraDirty_ = true;
-      }
-
-      ImGui::Separator();
+      ImGui::SliderFloat("Fly speed##cam", &flySpeed_, 0.05f, 10.0f, "%.2f");
       if (ImGui::SliderFloat("Damping##cam", &cameraConfig_.damping, 0.0f, 1.0f, "%.2f")) cameraDirty_ = true;
 
       ImGui::Separator();
-      ImGui::TextDisabled("LMB drag = offset XY, Wheel = offset Z");
-      if (cameraConfig_.rotMode == CameraConfig::RotMode::FreeOrbit) {
-        ImGui::TextDisabled("RMB drag = orbit around bone");
-      }
+      ImGui::TextDisabled("RMB drag = look around");
+      ImGui::TextDisabled("WASD/QE while RMB = move offset");
+      ImGui::TextDisabled("Wheel = fly speed");
       if (ImGui::Button("Reset to Free")) {
         cameraConfig_ = CameraConfig{};
-        cameraConfig_.mode = CameraConfig::Mode::Free;
         cameraDirty_ = true;
       }
     }
@@ -1227,6 +1249,16 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     ImGui::SliderFloat("Y##pivot", &pivotOffset_[1], -pivotRange, pivotRange, "%.3f");
     ImGui::SliderFloat("Z##pivot", &pivotOffset_[2], -pivotRange, pivotRange, "%.3f");
     if (ImGui::Button("Reset pivot")) {
+      pivotOffset_[0] = pivotOffset_[1] = pivotOffset_[2] = 0.0f;
+    }
+
+    // v0.16.0-alpha.3: nuclear reset that zeros every model-side
+    // transform at once. Useful when the user has been experimenting
+    // and the model ends up tilted / off-pivot — bringing things
+    // back to default is a single click instead of three.
+    ImGui::Separator();
+    if (ImGui::Button("Reset all transforms")) {
+      objectYaw_ = objectPitch_ = objectRoll_ = 0.0f;
       pivotOffset_[0] = pivotOffset_[1] = pivotOffset_[2] = 0.0f;
     }
   }
@@ -1274,6 +1306,38 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   ImGui::TextDisabled("HoloRoll v%s", HOLOROLL_VERSION_STRING);
   ImGui::TextDisabled("RMB + WASD/QE = fly | wheel = speed | LMB-drag arcs = rotate");
   ImGui::End();
+
+  // v0.16.0-alpha.3: bone-hover tooltip. When skeleton viz is on,
+  // find the closest joint to the mouse cursor in screen space. If
+  // it's within a small threshold AND ImGui doesn't own the mouse
+  // (so the panel doesn't block hover), pop up a tooltip with the
+  // joint name. Cheap O(N) scan over joints.
+  if (showSkeleton_ &&
+      status.jointNames &&
+      !jointScreenPos_.empty() &&
+      !ImGui::GetIO().WantCaptureMouse) {
+    const ImVec2 mp = ImGui::GetMousePos();
+    int bestIdx = -1;
+    float bestDist2 = 25.0f * 25.0f;  // 25px threshold (squared).
+    const std::size_t n = std::min(jointScreenPos_.size(), status.jointNames->size());
+    for (std::size_t j = 0; j < n; ++j) {
+      const float sx = jointScreenPos_[j][0];
+      const float sy = jointScreenPos_[j][1];
+      if (sx < 0.0f || sy < 0.0f) continue;  // behind camera.
+      const float dx = sx - mp.x;
+      const float dy = sy - mp.y;
+      const float d2 = dx * dx + dy * dy;
+      if (d2 < bestDist2) {
+        bestDist2 = d2;
+        bestIdx = static_cast<int>(j);
+      }
+    }
+    if (bestIdx >= 0) {
+      ImGui::BeginTooltip();
+      ImGui::Text("%s", (*status.jointNames)[bestIdx].c_str());
+      ImGui::EndTooltip();
+    }
+  }
 
   // v0.12.0-alpha.10: "New animations detected" modal removed.
   // Placement is now automatic — see ProcessWatcherEvents in entry.cpp.
@@ -1782,6 +1846,13 @@ void GlViewport::Render(const std::vector<float>& vertices,
 
   DrawScene(vertices, triangleIndices, playPositionSeconds, status);
 
+  // v0.16.0-alpha.2: skeleton + spring-arm visualisation. Renders on
+  // top of the mesh (depth test disabled inside DrawSkeleton). Cheap
+  // when toggled off — early-outs on the bool.
+  if (showSkeleton_) {
+    DrawSkeleton(status, frameIndex);
+  }
+
   // v0.10.0: 1.80-metre reference human, drawn after the user's mesh so it
   // overlaps cleanly. Anchored to the FRAME-0 bbox edge — not the current
   // frame's bbox — so the human stays still while the animation plays.
@@ -1931,17 +2002,175 @@ bool GlViewport::ConsumeCameraDirty() {
   return was;
 }
 
-// Resolve the active bone's world matrix at the current frame, then
-// compute camera target position (bone pos + offset, optionally in
-// bone local space) and target yaw/pitch (depending on rot mode).
-// Result lives in attachedActive_ / attachedTargetPos_ /
-// attachedTargetYaw_ / attachedTargetPitch_, consumed by UpdateInput
-// to drive the smoothed camera state.
+// v0.16.0-alpha.2 skeleton visualisation accessors.
+void GlViewport::SetSkeletonVisible(bool visible) {
+  if (showSkeleton_ != visible) {
+    showSkeleton_ = visible;
+    // Note: don't set skeletonDirty_ here — Set is used by
+    // entry.cpp's config-load path, which doesn't want to write back.
+  }
+}
+bool GlViewport::GetSkeletonVisible() const { return showSkeleton_; }
+bool GlViewport::ConsumeSkeletonDirty() {
+  const bool was = skeletonDirty_;
+  skeletonDirty_ = false;
+  return was;
+}
+
+// v0.16.0-alpha.2: render skeleton bones (lines connecting child →
+// parent joints) + joint dots, with optional spring-arm dashed line
+// from camera to attach anchor when in Attached mode.
 //
-// Called once per Render() before UpdateInput. If the configured bone
-// isn't present in the current animation (or no animation is active,
-// or mode == Free), attachedActive_ ends up false and the existing
-// Free camera path runs unchanged.
+// All drawing uses the legacy GL_LINES / GL_POINTS path; matches the
+// rest of this viewport's rendering style. Drawn AFTER the mesh in
+// DrawScene with depth test disabled so the skeleton stays visible
+// through the body — debug aid for picking the right bone.
+//
+// Joint positions are computed by applying the same object-rotation
+// transform that DrawScene applies to the mesh (around pivot, then
+// yaw/pitch/roll). Without this the skeleton would float separately
+// from the rendered character whenever object rotation is non-zero.
+void GlViewport::DrawSkeleton(const OverlayStatus& status,
+                              std::uint32_t frameIndex) {
+  jointScreenPos_.clear();
+  if (!status.jointWorldMatrices || !status.jointNames) return;
+  if (status.jointWorldMatrices->empty()) return;
+
+  const std::size_t jointCount = status.jointWorldMatrices->size();
+
+  // Pre-compute every joint's RENDERED world position at this frame.
+  const float px = status.autoPivot[0] + pivotOffset_[0];
+  const float py = status.autoPivot[1] + pivotOffset_[1];
+  const float pz = status.autoPivot[2] + pivotOffset_[2];
+  const float ya = objectYaw_   * kDeg2Rad;
+  const float pa = objectPitch_ * kDeg2Rad;
+  const float ra = objectRoll_  * kDeg2Rad;
+  const float cy = std::cos(ya), sy = std::sin(ya);
+  const float cp = std::cos(pa), sp = std::sin(pa);
+  const float cr = std::cos(ra), sr = std::sin(ra);
+
+  std::vector<std::array<float, 3>> jointPos(jointCount);
+  for (std::size_t j = 0; j < jointCount; ++j) {
+    const auto& frames = (*status.jointWorldMatrices)[j];
+    if (frames.empty()) { jointPos[j] = {0, 0, 0}; continue; }
+    const std::uint32_t f = (frameIndex >= frames.size())
+        ? static_cast<std::uint32_t>(frames.size() - 1)
+        : frameIndex;
+    const auto& M = frames[f];
+    float x = M[12] - px;
+    float y = M[13] - py;
+    float z = M[14] - pz;
+    { const float nx =  cy * x + sy * z; const float nz = -sy * x + cy * z; x = nx; z = nz; }
+    { const float ny =  cp * y - sp * z; const float nz =  sp * y + cp * z; y = ny; z = nz; }
+    { const float nx =  cr * x - sr * y; const float ny =  sr * x + cr * y; x = nx; y = ny; }
+    jointPos[j][0] = x + px;
+    jointPos[j][1] = y + py;
+    jointPos[j][2] = z + pz;
+  }
+
+  // Save GL state we'll touch.
+  glPushAttrib(GL_ENABLE_BIT | GL_LINE_BIT | GL_POINT_BIT | GL_CURRENT_BIT);
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_LIGHTING);
+  glDisable(GL_TEXTURE_2D);
+
+  // Bone segments: yellow lines from each joint to its parent.
+  if (status.jointParents) {
+    glLineWidth(2.0f);
+    glColor3f(1.0f, 0.85f, 0.2f);
+    glBegin(GL_LINES);
+    for (std::size_t j = 0; j < jointCount && j < status.jointParents->size(); ++j) {
+      const int p = (*status.jointParents)[j];
+      if (p < 0 || static_cast<std::size_t>(p) >= jointCount) continue;
+      glVertex3fv(jointPos[j].data());
+      glVertex3fv(jointPos[p].data());
+    }
+    glEnd();
+  }
+
+  // Joint dots: brighter yellow.
+  glPointSize(6.0f);
+  glColor3f(1.0f, 1.0f, 0.3f);
+  glBegin(GL_POINTS);
+  for (std::size_t j = 0; j < jointCount; ++j) {
+    glVertex3fv(jointPos[j].data());
+  }
+  glEnd();
+
+  // v0.16.0-alpha.3: project joint world positions to screen-pixel
+  // coords for the hover-tooltip in DrawOverlay. Manual MVP project
+  // (we have matModelView_ + matProjection_ captured already this
+  // frame). Joints behind the camera (cw <= 0) get sentinel -1.
+  jointScreenPos_.assign(jointCount, {-1.0f, -1.0f});
+  const float vw = static_cast<float>(viewportWidth_);
+  const float vh = static_cast<float>(viewportHeight_);
+  for (std::size_t j = 0; j < jointCount; ++j) {
+    const float x = jointPos[j][0];
+    const float y = jointPos[j][1];
+    const float z = jointPos[j][2];
+    const float ex = matModelView_[0]*x + matModelView_[4]*y + matModelView_[8]*z  + matModelView_[12];
+    const float ey = matModelView_[1]*x + matModelView_[5]*y + matModelView_[9]*z  + matModelView_[13];
+    const float ez = matModelView_[2]*x + matModelView_[6]*y + matModelView_[10]*z + matModelView_[14];
+    const float ew = matModelView_[3]*x + matModelView_[7]*y + matModelView_[11]*z + matModelView_[15];
+    const float cx = matProjection_[0]*ex + matProjection_[4]*ey + matProjection_[8]*ez  + matProjection_[12]*ew;
+    const float cy = matProjection_[1]*ex + matProjection_[5]*ey + matProjection_[9]*ez  + matProjection_[13]*ew;
+    const float cw = matProjection_[3]*ex + matProjection_[7]*ey + matProjection_[11]*ez + matProjection_[15]*ew;
+    if (cw <= 0.0001f) continue;  // behind camera.
+    const float ndcX = cx / cw;
+    const float ndcY = cy / cw;
+    jointScreenPos_[j][0] = (ndcX * 0.5f + 0.5f) * vw;
+    jointScreenPos_[j][1] = (1.0f - (ndcY * 0.5f + 0.5f)) * vh;
+  }
+
+  // Spring-arm visualisation: dashed line from camera position to
+  // the bone (attach anchor without offset), plus a bigger sphere-
+  // ish marker at the anchor.
+  if (attachedActive_) {
+    glLineStipple(2, static_cast<GLushort>(0x00FF));
+    glEnable(GL_LINE_STIPPLE);
+    glLineWidth(2.0f);
+    glColor3f(0.4f, 1.0f, 1.0f);  // cyan.
+    glBegin(GL_LINES);
+    glVertex3f(cameraPosX_, cameraPosY_, cameraPosZ_);
+    glVertex3f(attachedBoneRenderedPos_[0],
+               attachedBoneRenderedPos_[1],
+               attachedBoneRenderedPos_[2]);
+    glEnd();
+    glDisable(GL_LINE_STIPPLE);
+
+    // Anchor marker: bigger cyan dot at the attach bone.
+    glPointSize(12.0f);
+    glColor3f(0.4f, 1.0f, 1.0f);
+    glBegin(GL_POINTS);
+    glVertex3f(attachedBoneRenderedPos_[0],
+               attachedBoneRenderedPos_[1],
+               attachedBoneRenderedPos_[2]);
+    glEnd();
+
+    // Camera-side anchor dot: small but visible so you can see where
+    // the camera technically sits.
+    glPointSize(8.0f);
+    glColor3f(1.0f, 0.5f, 0.4f);
+    glBegin(GL_POINTS);
+    glVertex3f(cameraPosX_, cameraPosY_, cameraPosZ_);
+    glEnd();
+  }
+
+  glPopAttrib();
+}
+
+// v0.16.0-alpha.2: resolve the active bone's world matrix at the
+// current frame and compute the camera target position. Crucially,
+// applies the same object-rotation transform that the mesh gets in
+// DrawScene (rotate around pivot by objectYaw/Pitch/Roll) so the
+// camera lands at the RENDERED bone position, not the bone position
+// in raw model space. Without this transform offset was off whenever
+// the user had non-zero object rotation or pivot.
+//
+// alpha.2 also drops yaw/pitch extraction — rotation is fully user-
+// controlled now (RMB drag like Free mode). Only position is bone-
+// derived. Stores both the offset-applied target AND the bone's own
+// rendered position (used by DrawSkeleton's spring arm).
 void GlViewport::ResolveAttachedTarget(const OverlayStatus& status,
                                        std::uint32_t frameIndex) {
   attachedActive_ = false;
@@ -1970,41 +2199,80 @@ void GlViewport::ResolveAttachedTarget(const OverlayStatus& status,
       : frameIndex;
   const auto& M = boneFrames[f];
 
-  // Column-major 4x4. Bone world position = last column translation.
-  const float boneX = M[12];
-  const float boneY = M[13];
-  const float boneZ = M[14];
+  // v0.16.0-alpha.3: cache raw bone matrix so UpdateInput can inverse-
+  // transform WASD deltas back into offset-frame.
+  for (int i = 0; i < 16; ++i) attachedBoneMatrix_[i] = M[i];
 
-  // Compute camera target position.
+  // Step 1: compute target in MODEL space (before object rotation).
+  // Two flavours per offsetLocal:
+  //   true  - offset is in bone local space, transformed by M.
+  //   false - offset is in model space, simply added to bone pos.
+  float targetModel[3];
   if (cameraConfig_.offsetLocal) {
-    // target = M * (offset, 1). Apply rotation+translation to offset.
     const float ox = cameraConfig_.offsetX;
     const float oy = cameraConfig_.offsetY;
     const float oz = cameraConfig_.offsetZ;
-    attachedTargetPos_[0] = M[0]*ox + M[4]*oy + M[8]*oz  + M[12];
-    attachedTargetPos_[1] = M[1]*ox + M[5]*oy + M[9]*oz  + M[13];
-    attachedTargetPos_[2] = M[2]*ox + M[6]*oy + M[10]*oz + M[14];
+    targetModel[0] = M[0]*ox + M[4]*oy + M[8]*oz  + M[12];
+    targetModel[1] = M[1]*ox + M[5]*oy + M[9]*oz  + M[13];
+    targetModel[2] = M[2]*ox + M[6]*oy + M[10]*oz + M[14];
   } else {
-    attachedTargetPos_[0] = boneX + cameraConfig_.offsetX;
-    attachedTargetPos_[1] = boneY + cameraConfig_.offsetY;
-    attachedTargetPos_[2] = boneZ + cameraConfig_.offsetZ;
+    targetModel[0] = M[12] + cameraConfig_.offsetX;
+    targetModel[1] = M[13] + cameraConfig_.offsetY;
+    targetModel[2] = M[14] + cameraConfig_.offsetZ;
   }
+  // Bone pos by itself (for spring arm visualisation, before offset).
+  float boneModel[3] = {M[12], M[13], M[14]};
 
-  // Camera look direction extraction.
-  //
-  // glTF bone "forward" is local -Z. In world space that's
-  // (-M[8], -M[9], -M[10]). Camera Fly convention here is:
-  //   forward = (-sin yaw cos pitch, sin pitch, -cos yaw cos pitch)
-  // Solve:
-  //   yaw   = atan2(M[8], M[10])
-  //   pitch = asin(-M[9])
-  // For identity matrix (M[8]=0, M[9]=0, M[10]=1) → yaw=0, pitch=0
-  // i.e. camera looks down -Z which is the GL default.
-  constexpr float kRad2Deg = 180.0f / 3.14159265358979323846f;
-  const float yawRad   = std::atan2(M[8], M[10]);
-  const float pitchRad = std::asin(std::clamp(-M[9], -1.0f, 1.0f));
-  attachedTargetYaw_   = yawRad   * kRad2Deg;
-  attachedTargetPitch_ = pitchRad * kRad2Deg;
+  // Step 2: apply DrawScene's object-rotation transform around pivot.
+  //   p_rendered = T(pivot) * R(yaw,Y) * R(pitch,X) * R(roll,Z) * T(-pivot) * p
+  // Same order as the glMatrix calls in DrawScene line ~692.
+  const float px = status.autoPivot[0] + pivotOffset_[0];
+  const float py = status.autoPivot[1] + pivotOffset_[1];
+  const float pz = status.autoPivot[2] + pivotOffset_[2];
+
+  const float ya = objectYaw_   * kDeg2Rad;
+  const float pa = objectPitch_ * kDeg2Rad;
+  const float ra = objectRoll_  * kDeg2Rad;
+  auto applyObjectRotationAround = [&](float p[3]) {
+    // Translate so pivot is origin.
+    float x = p[0] - px;
+    float y = p[1] - py;
+    float z = p[2] - pz;
+    {
+      const float cy = std::cos(ya), sy = std::sin(ya);
+      const float nx =  cy * x + sy * z;
+      const float nz = -sy * x + cy * z;
+      x = nx; z = nz;
+    }
+    // Rotate X (pitch).
+    {
+      const float cp = std::cos(pa), sp = std::sin(pa);
+      const float ny = cp * y - sp * z;
+      const float nz = sp * y + cp * z;
+      y = ny; z = nz;
+    }
+    // Rotate Z (roll).
+    {
+      const float cr = std::cos(ra), sr = std::sin(ra);
+      const float nx = cr * x - sr * y;
+      const float ny = sr * x + cr * y;
+      x = nx; y = ny;
+    }
+    // Translate pivot back.
+    p[0] = x + px;
+    p[1] = y + py;
+    p[2] = z + pz;
+  };
+
+  applyObjectRotationAround(targetModel);
+  applyObjectRotationAround(boneModel);
+
+  attachedTargetPos_[0] = targetModel[0];
+  attachedTargetPos_[1] = targetModel[1];
+  attachedTargetPos_[2] = targetModel[2];
+  attachedBoneRenderedPos_[0] = boneModel[0];
+  attachedBoneRenderedPos_[1] = boneModel[1];
+  attachedBoneRenderedPos_[2] = boneModel[2];
 
   attachedActive_ = true;
 }

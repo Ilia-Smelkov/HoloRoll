@@ -758,6 +758,26 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
                                 : std::string{};
     jointNames_.push_back(nm.empty() ? ("joint_" + std::to_string(j)) : nm);
   }
+
+  // v0.16.0-alpha.2: build joint-level parent index for the skeleton
+  // visualisation. The existing `parents[]` array is indexed by NODE
+  // (model-wide), but the camera UI works in JOINT space. We translate
+  // by scanning skin.joints[] for the parent node's joint slot. -1
+  // means "this joint has no joint parent" (skeleton root, or parent
+  // node is not itself a skin joint).
+  jointParents_.assign(jointCount, -1);
+  for (std::size_t j = 0; j < jointCount; ++j) {
+    const int nodeIdx = skin.joints[j];
+    if (nodeIdx < 0 || nodeIdx >= static_cast<int>(parents.size())) continue;
+    const int parentNode = parents[nodeIdx];
+    if (parentNode < 0) continue;
+    for (std::size_t k = 0; k < jointCount; ++k) {
+      if (skin.joints[k] == parentNode) {
+        jointParents_[j] = static_cast<int>(k);
+        break;
+      }
+    }
+  }
   worldMotion_.assign(jointCount, std::vector<float>(totalFrames_, 0.0f));
   // v0.12.0-alpha.2: local motion now computed alongside world motion.
   // See the bake loop below for the per-frame computation.

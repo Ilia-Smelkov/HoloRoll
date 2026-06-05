@@ -97,6 +97,13 @@ class GlbLoader {
     return jointWorldMatrices_;
   }
 
+  // v0.16.0-alpha.2: parent joint indices for skeleton visualisation.
+  // jointParents_[j] is the index of joint j's parent joint, or -1 if
+  // j has no joint-parent (skeleton root, or its model-parent isn't
+  // itself part of skin.joints). Used by gl_viewport to draw bones
+  // (lines connecting child joint → parent joint).
+  const std::vector<int>& JointParents() const { return jointParents_; }
+
  private:
   bool loaded_ = false;
   std::string lastError_;
@@ -119,4 +126,8 @@ class GlbLoader {
   // v0.16.0-alpha.1: per-joint per-frame world matrix, captured during
   // bake alongside the motion analysis. Indexed [boneIdx][frameIdx].
   std::vector<std::vector<BoneMatrix>> jointWorldMatrices_;
+
+  // v0.16.0-alpha.2: per-joint parent index for skeleton-viz line
+  // rendering. -1 means "no joint parent" (root or out-of-skin parent).
+  std::vector<int> jointParents_;
 };
