@@ -465,28 +465,35 @@ void GlViewport::UpdateInput(float dtSeconds) {
         // For orthonormal M, M^-1's 3x3 part is M's 3x3 transpose.
         float dx = moveX, dy = moveY, dz = moveZ;
 
-        // Step A: undo object rotation (Y * X * Z order → inverse is
-        // Z(-roll) * X(-pitch) * Y(-yaw) applied in reverse).
+        // v0.16.0-alpha.4: forward object transform is
+        //   R(yaw, Y) * R(pitch, X) * R(roll, Z)  (applied right-to-left
+        //   to vertex: Z first, then X, then Y).
+        // Inverse is R(-roll, Z) * R(-pitch, X) * R(-yaw, Y), which
+        // applied to a vector means: Y first, then X, then Z. Order
+        // matters when more than one of yaw/pitch/roll is non-zero.
         const float ya = -objectYaw_   * kDeg2Rad;
         const float pa = -objectPitch_ * kDeg2Rad;
         const float ra = -objectRoll_  * kDeg2Rad;
+        // Y (-yaw) first.
         {
-          const float cr = std::cos(ra), sr = std::sin(ra);
-          const float nx = cr * dx - sr * dy;
-          const float ny = sr * dx + cr * dy;
-          dx = nx; dy = ny;
+          const float cy = std::cos(ya), sy = std::sin(ya);
+          const float nx =  cy * dx + sy * dz;
+          const float nz = -sy * dx + cy * dz;
+          dx = nx; dz = nz;
         }
+        // Then X (-pitch).
         {
           const float cp = std::cos(pa), sp = std::sin(pa);
           const float ny = cp * dy - sp * dz;
           const float nz = sp * dy + cp * dz;
           dy = ny; dz = nz;
         }
+        // Then Z (-roll).
         {
-          const float cy = std::cos(ya), sy = std::sin(ya);
-          const float nx =  cy * dx + sy * dz;
-          const float nz = -sy * dx + cy * dz;
-          dx = nx; dz = nz;
+          const float cr = std::cos(ra), sr = std::sin(ra);
+          const float nx = cr * dx - sr * dy;
+          const float ny = sr * dx + cr * dy;
+          dx = nx; dy = ny;
         }
 
         // Step B: if offsetLocal, undo bone rotation via 3x3 transpose
@@ -1223,8 +1230,18 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
       ImGui::TextDisabled("RMB drag = look around");
       ImGui::TextDisabled("WASD/QE while RMB = move offset");
       ImGui::TextDisabled("Wheel = fly speed");
-      if (ImGui::Button("Reset to Free")) {
-        cameraConfig_ = CameraConfig{};
+      // v0.16.0-alpha.4: don't switch mode. Just reset the camera-
+      // attach transforms (offset + offsetLocal + damping) to defaults,
+      // mirroring the Object section's per-section Reset buttons.
+      // boneName + mode are deliberately preserved — user usually
+      // doesn't want to re-pick the bone after a transform reset.
+      if (ImGui::Button("Reset transforms")) {
+        const CameraConfig defaults;
+        cameraConfig_.offsetX     = defaults.offsetX;
+        cameraConfig_.offsetY     = defaults.offsetY;
+        cameraConfig_.offsetZ     = defaults.offsetZ;
+        cameraConfig_.offsetLocal = defaults.offsetLocal;
+        cameraConfig_.damping     = defaults.damping;
         cameraDirty_ = true;
       }
     }
@@ -2060,9 +2077,18 @@ void GlViewport::DrawSkeleton(const OverlayStatus& status,
     float x = M[12] - px;
     float y = M[13] - py;
     float z = M[14] - pz;
-    { const float nx =  cy * x + sy * z; const float nz = -sy * x + cy * z; x = nx; z = nz; }
-    { const float ny =  cp * y - sp * z; const float nz =  sp * y + cp * z; y = ny; z = nz; }
+    // v0.16.0-alpha.4: rotation order MUST match DrawScene:
+    //   T(p) * R(yaw, Y) * R(pitch, X) * R(roll, Z) * T(-p)
+    // For a vertex, this applies (right-to-left): T(-p), then
+    // R(roll, Z), then R(pitch, X), then R(yaw, Y), then T(p).
+    // alpha.2/.3 had this in the WRONG order (Y, X, Z), which only
+    // looked correct when at most one of yaw/pitch/roll was nonzero.
+    // Apply Z (roll) first.
     { const float nx =  cr * x - sr * y; const float ny =  sr * x + cr * y; x = nx; y = ny; }
+    // Then X (pitch).
+    { const float ny =  cp * y - sp * z; const float nz =  sp * y + cp * z; y = ny; z = nz; }
+    // Then Y (yaw).
+    { const float nx =  cy * x + sy * z; const float nz = -sy * x + cy * z; x = nx; z = nz; }
     jointPos[j][0] = x + px;
     jointPos[j][1] = y + py;
     jointPos[j][2] = z + pz;
@@ -2156,6 +2182,29 @@ void GlViewport::DrawSkeleton(const OverlayStatus& status,
     glEnd();
   }
 
+  // v0.16.0-alpha.4: visual diagnostic for the "skeleton offset" bug.
+  // The autoPivot is the mesh's frame-0 bbox centre — i.e. where the
+  // rendered character lives in world space. We mark it with a small
+  // magenta cross. If the yellow joint dots cluster around this cross
+  // → mesh and bones are co-located, things are correct. If joints
+  // sit far off (typical case: skeleton root has a translation that's
+  // baked into joint world matrices but NOT into the mesh-side
+  // skinning result via IBM compensation), this cross stays at the
+  // mesh while joints float elsewhere — instantly identifies the bug.
+  {
+    glColor3f(1.0f, 0.2f, 1.0f);  // magenta.
+    glLineWidth(2.0f);
+    const float cx = status.autoPivot[0] + pivotOffset_[0];
+    const float cy_ = status.autoPivot[1] + pivotOffset_[1];
+    const float cz_ = status.autoPivot[2] + pivotOffset_[2];
+    const float r = std::max(0.05f, status.autoExtent * 0.08f);
+    glBegin(GL_LINES);
+    glVertex3f(cx - r, cy_,     cz_); glVertex3f(cx + r, cy_,     cz_);
+    glVertex3f(cx,     cy_ - r, cz_); glVertex3f(cx,     cy_ + r, cz_);
+    glVertex3f(cx,     cy_,     cz_ - r); glVertex3f(cx, cy_,     cz_ + r);
+    glEnd();
+  }
+
   glPopAttrib();
 }
 
@@ -2234,31 +2283,36 @@ void GlViewport::ResolveAttachedTarget(const OverlayStatus& status,
   const float pa = objectPitch_ * kDeg2Rad;
   const float ra = objectRoll_  * kDeg2Rad;
   auto applyObjectRotationAround = [&](float p[3]) {
-    // Translate so pivot is origin.
+    // v0.16.0-alpha.4: rotation order must match DrawScene exactly.
+    // The matrix `T(p) * R(yaw, Y) * R(pitch, X) * R(roll, Z) * T(-p)`
+    // applied to vertex v gives (right-to-left composition):
+    //   T(-p), then R(roll, Z), then R(pitch, X), then R(yaw, Y), T(p).
+    // alpha.2/.3 used Y, X, Z order — wrong, but symptomless when only
+    // one of yaw/pitch/roll was non-zero (most casual testing).
     float x = p[0] - px;
     float y = p[1] - py;
     float z = p[2] - pz;
-    {
-      const float cy = std::cos(ya), sy = std::sin(ya);
-      const float nx =  cy * x + sy * z;
-      const float nz = -sy * x + cy * z;
-      x = nx; z = nz;
-    }
-    // Rotate X (pitch).
-    {
-      const float cp = std::cos(pa), sp = std::sin(pa);
-      const float ny = cp * y - sp * z;
-      const float nz = sp * y + cp * z;
-      y = ny; z = nz;
-    }
-    // Rotate Z (roll).
+    // Z (roll) first.
     {
       const float cr = std::cos(ra), sr = std::sin(ra);
       const float nx = cr * x - sr * y;
       const float ny = sr * x + cr * y;
       x = nx; y = ny;
     }
-    // Translate pivot back.
+    // Then X (pitch).
+    {
+      const float cp = std::cos(pa), sp = std::sin(pa);
+      const float ny = cp * y - sp * z;
+      const float nz = sp * y + cp * z;
+      y = ny; z = nz;
+    }
+    // Then Y (yaw).
+    {
+      const float cy = std::cos(ya), sy = std::sin(ya);
+      const float nx =  cy * x + sy * z;
+      const float nz = -sy * x + cy * z;
+      x = nx; z = nz;
+    }
     p[0] = x + px;
     p[1] = y + py;
     p[2] = z + pz;

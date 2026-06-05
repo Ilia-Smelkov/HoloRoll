@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0-alpha.4] — 2026-06-06
+
+Reset-button polish + rotation-order bug squashed + skeleton-offset
+visual diagnostic.
+
+### Fixed
+- **Rotation order in three places.** The `DrawScene` mesh transform
+  is `T(p) · R(yaw, Y) · R(pitch, X) · R(roll, Z) · T(-p)`, which
+  applied to a vertex means **Z first, then X, then Y** (right-to-
+  left composition order). alpha.2/.3 implemented `DrawSkeleton`,
+  `ResolveAttachedTarget`, and the WASD inverse-transform with Y
+  first, then X, then Z — symptomless for testing with only one
+  axis non-zero (most casual usage), but joints + camera target
+  drifted from the mesh whenever two or more of objectYaw/Pitch/Roll
+  were set. alpha.4 fixes all three sites:
+  - `DrawSkeleton` joint world projection: Z, X, Y order.
+  - `ResolveAttachedTarget::applyObjectRotationAround`: Z, X, Y order.
+  - `UpdateInput` WASD inverse: Y, X, Z order (mirror inverse).
+
+### Changed
+- **"Reset to Free" button is now "Reset transforms"** and no longer
+  switches mode. Mirrors the Object section's per-section Reset
+  buttons: only resets offset XYZ + offsetLocal + damping to
+  defaults, preserves mode + boneName so the user doesn't have to
+  re-pick the bone after fiddling.
+
+### Added — skeleton-offset visual diagnostic
+- **Magenta cross at mesh bbox centre** (autoPivot + pivotOffset),
+  drawn alongside the skeleton when `Show skeleton` is on. Lives in
+  the same world space the mesh is rendered in. Use it as a sanity
+  check: yellow joint dots clustered around the cross means
+  bones + mesh are co-located. Joint dots floating far off means the
+  GLB has a skeleton-root translation that's baked into the joint
+  world matrices but is compensated for via IBMs on the mesh-skinning
+  side — a known glTF/Blender export pattern that needs a separate
+  fix in the parser. Now we can SEE that gap instead of guessing.
+
+
 ## [0.16.0-alpha.3] — 2026-06-06
 
 Camera attach micro-fixes per feedback: WASD world-alignment in
@@ -2639,7 +2677,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.3...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.4...HEAD
+[0.16.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.4
 [0.16.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.3
 [0.16.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.2
 [0.16.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.1
