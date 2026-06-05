@@ -86,6 +86,20 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.pcm_Source_CreateFromFile = reinterpret_cast<PCM_Source_CreateFromFileFn>(rec->GetFunc("PCM_Source_CreateFromFile"));
   api.setMediaItemTake_Source   = reinterpret_cast<SetMediaItemTake_SourceFn>(rec->GetFunc("SetMediaItemTake_Source"));
 
+  // v0.15.0-alpha.1: per-take playrate access for slowdown.
+  api.setMediaItemTakeInfo_Value = reinterpret_cast<SetMediaItemTakeInfo_ValueFn>(rec->GetFunc("SetMediaItemTakeInfo_Value"));
+  api.getMediaItemTakeInfo_Value = reinterpret_cast<GetMediaItemTakeInfo_ValueFn>(rec->GetFunc("GetMediaItemTakeInfo_Value"));
+
+  // v0.14.0-alpha.11: canonical item-chunk API — modern REAPER SDK
+  // splits this into separate Get + Set functions with different
+  // signatures. alpha.9 bound the obsolete unified `GetSetItemStateChunk`
+  // symbol which doesn't exist in current builds → all chunk reads
+  // returned false → reverse detection never fired.
+  //   bool GetItemStateChunk(MediaItem*, char* buf, int buf_sz, bool isundo);
+  //   bool SetItemStateChunk(MediaItem*, const char* str, bool isundo);
+  api.getItemStateChunk = reinterpret_cast<GetItemStateChunkFn>(rec->GetFunc("GetItemStateChunk"));
+  api.setItemStateChunk = reinterpret_cast<SetItemStateChunkFn>(rec->GetFunc("SetItemStateChunk"));
+
   // v0.12.0-alpha.15: socket bridge — action registration / shortcut
   // introspection / edit cursor.
   api.reverseNamedCommandLookup = reinterpret_cast<ReverseNamedCommandLookupFn>(rec->GetFunc("ReverseNamedCommandLookup"));

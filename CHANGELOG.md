@@ -7,6 +7,243 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0-alpha.1] — 2026-06-05
+
+First 0.15 release. Bundles the alpha.5-.11 reverse-via-SECTION work
+into a stable feature, adds slowdown/speedup via `playrate`, removes
+the heavy diagnostic logging that helped land alpha.11.
+
+### Added — slowdown / speedup via per-unit `playrate`
+
+- New per-unit field in `build_regions`:
+  ```jsonc
+  {
+    "anim": "door_open",
+    "name": "DoorSlow",
+    "variations": 1,
+    "playrate": 0.5,           // 0.5 = half speed = 2x slowdown
+    "reverse": false
+  }
+  ```
+  - `1.0` (default): original speed.
+  - `0.5`: animation plays half speed, item visual length stretches
+    to 2x animation duration.
+  - `2.0`: animation plays double speed, item shrinks to 0.5x
+    animation duration.
+  - Stacks with `reverse: true` — slow-motion reverse is a thing now.
+  - Invalid values (`<= 0`) cause the unit to skip with a `reason`
+    in the response.
+- Implementation:
+  - `il` (item length) is recomputed as `anim_duration / playrate`
+    using the library's frame count + project fps instead of the
+    discovered item's `D_LENGTH`. Forward-source `D_LENGTH` is
+    overwritten to match so the source item visually stretches in
+    REAPER's arrange view.
+  - Every variation's active take gets `D_PLAYRATE = playrate`
+    via the new `SetItemPlayrate` helper.
+  - For reverse variations, playrate is applied BEFORE the SECTION
+    wrap so the chunk-write captures the rate in the `PLAYRATE`
+    field.
+- Preview-side propagation:
+  - `DiscoveredItem.playrate` populated from each take's
+    `D_PLAYRATE` (default 1.0).
+  - `ResolvePlayheadFromItems` scales `localTime` by `playrate`
+    before mapping to frame index. Combined with reverse-inversion
+    this handles every (forward/reverse × normal/slow/fast)
+    combination uniformly.
+  - `WriteMotionEnvelopeForBone` / `WriteMotionEnvelopesForItem`
+    take an optional `playrate` parameter; envelope points are
+    placed at `itemStart + frameIdx / (fps * playrate)` so the
+    curve stretches with the audio.
+- New REAPER API bindings: `SetMediaItemTakeInfo_Value`,
+  `GetMediaItemTakeInfo_Value`.
+
+### Changed — reverse mechanism graduation
+- All alpha.5-.11 work on the SECTION/MODE 2 reverse path is now
+  considered stable.
+- API audit at plugin init kept for future debugging:
+  ```
+  [holoroll-reverse] API audit on init:
+    GetItemStateChunk resolved: yes
+    SetItemStateChunk resolved: yes
+    ...
+    silence.wav path: <full path>
+  ```
+- ReadItemChunk "first call" log kept (one-shot, useful safety net
+  if a REAPER update breaks the binding again).
+
+### Removed — heavy diagnostics
+- IsItemReversedViaChunk chunk dumps + MODE-candidate logs (dedup-
+  by-hash logging from alpha.8). The hot path runs on every OnTimer
+  × every item; logs would re-fire on chunk content changes and
+  noisy our output during normal use.
+- SetItemReverseViaChunk PRE-WRAP / WRITING / POST-WRITE READ-BACK
+  trio (alpha.8). Useful while diagnosing chunk normalisation, dead
+  weight now.
+- "Empty chunk -> false" one-shot warning. Was useful before
+  alpha.11 fixed the API binding; redundant now that ReadItemChunk
+  first-call covers it.
+
+
+## [0.14.0-alpha.11] — 2026-06-05
+
+The REAL real root cause: wrong function names. alpha.9-.10 bound
+`GetSetItemStateChunk`, which is the **deprecated** unified accessor.
+Modern REAPER SDK exposes two separate functions: `GetItemStateChunk`
+(with explicit buffer size) and `SetItemStateChunk`. GetFunc returned
+nullptr for the deprecated name, so every chunk read fell back to
+`GetSetMediaItemInfo_String("P_CHUNK")` which also returns false on
+chunks → reverse-detection broken since alpha.5.
+
+### Fixed
+- **Chunk API bindings switched to modern split form.**
+  - `bool GetItemStateChunk(MediaItem*, char* buf, int buf_sz, bool isundo)`
+    (4-arg, explicit buffer size).
+  - `bool SetItemStateChunk(MediaItem*, const char* str, bool isundo)`.
+  - Found by grep over `third_party/reaper-sdk/sdk/reaper_plugin_functions.h`
+    — should have looked there from the start.
+- Updated API audit to print resolution status for both functions:
+  ```
+  GetItemStateChunk resolved: yes/NO
+  SetItemStateChunk resolved: yes/NO
+  ```
+
+
+## [0.14.0-alpha.10] — 2026-06-05
+
+Kill updater log spam, focus the reverse-diagnostic trail.
+
+### Fixed
+- **`updater::WorkerMain` now stamps `update.last_check_unix` at the
+  START of every poll.** Previously the timestamp updated only on
+  success, so any failure path (network down, JSON parse error,
+  missing `tag_name`, "up to date") left it stale. `updater::Tick`
+  then re-fired WorkerMain on every OnTimer (~30 Hz), producing
+  30 spam lines/sec like
+  `[holoroll-updater] latest release missing tag_name or matching installer asset.`
+  Failed polls now wait the full 24 h cooldown before auto-retry.
+  Manual retry via the "Check for updates" button bypasses cooldown,
+  so the user isn't trapped.
+
+### Changed — diagnostic trail
+- **`ReadItemChunk` logging reduced to one-shot.** Previously logged
+  the API path + result on every call (rate-limited to 20 per
+  session per path); the rate limit was exhausted by OnTimer ticks
+  before `build_regions` runs, drowning the build-time trail. Now
+  ReadItemChunk logs exactly the FIRST call's outcome and stays
+  silent thereafter.
+- **`WriteItemChunk` logging removed.** WriteItemChunk is only
+  called from SetItemReverseViaChunk which already logs
+  PRE-WRAP / WRITING / POST-WRITE READ-BACK trio with full context.
+  The per-write line was redundant noise.
+- **API audit at plugin init.** When debug log is enabled, plugin
+  load now prints a one-shot audit:
+  ```
+  [holoroll-reverse] API audit on init:
+    GetSetItemStateChunk resolved: yes/NO
+    GetSetMediaItemInfo_String resolved: yes/NO
+    PCM_Source_CreateFromFile resolved: yes/NO
+    SetMediaItemTake_Source resolved: yes/NO
+    silence.wav path: <full path or <EMPTY>>
+  ```
+  If any of these read NO, we know reverse is broken at the API
+  layer and can stop debugging chunk parsing.
+
+
+## [0.14.0-alpha.9] — 2026-06-05
+
+Real root cause: P_CHUNK access through the wrong API. alpha.5-.8 used
+`GetSetMediaItemInfo_String` with `parmname="P_CHUNK"`, which is
+documented only for short strings (P_NAME / P_NOTES / P_EXT:*) — it
+silently returns false on chunk reads in observed REAPER builds. The
+canonical API for item chunks is `GetSetItemStateChunk`.
+
+### Fixed
+- **ReadItemChunk / WriteItemChunk now use `GetSetItemStateChunk`.**
+  - alpha.8's diagnostic instrumentation revealed
+    `[holoroll-reverse] IsItemReversedViaChunk: empty chunk -> false`
+    log spam, confirming that the chunk read always returned empty.
+  - GetSetItemStateChunk is REAPER's documented item-chunk API and
+    works reliably across versions.
+  - Signature: `bool GetSetItemStateChunk(MediaItem* item, char* str, bool isundo)`.
+  - Buffer bumped to 4 MB (paranoia level) — typical HoloRoll
+    chunks are 1-3 KB.
+  - Legacy `GetSetMediaItemInfo_String("P_CHUNK")` retained as
+    fallback if the canonical function isn't resolved (very old
+    REAPER builds).
+
+### Added — API path diagnostics
+- `ReadItemChunk` and `WriteItemChunk` log the API path used and
+  return value:
+  - `[holoroll-reverse] ReadItemChunk: GetSetItemStateChunk -> true, strlen=NNNN`
+  - `[holoroll-reverse] WriteItemChunk: GetSetItemStateChunk -> true`
+- ReadItemChunk per-API logging is rate-limited to first 20 calls
+  per session per API path to avoid OnTimer spam.
+
+### Changed — log dedup
+- `IsItemReversedViaChunk` empty-chunk log now fires once per
+  session (was: every OnTimer tick × every item, manifested as
+  the spam the user reported in alpha.8).
+
+
+## [0.14.0-alpha.8] — 2026-06-05
+
+Diagnostic logging for reverse-detection. alpha.7's bitmask fix didn't
+fix the symptom — animations still played forwards over items REAPER's
+GUI marked as reversed. alpha.8 instruments the read/write/parse path
+so we can see exactly what REAPER stores and reads back.
+
+### Added — chunk dumps via SpikeLog
+
+All logs are gated by `g_debugEnabled` (`debug.enabled = true` in
+config, or the Debug log checkbox in the HoloRoll UI). Tag:
+`[holoroll-reverse]`.
+
+- **`SetItemReverseViaChunk`** logs four points per call:
+  1. PRE-WRAP — chunk as read from the freshly-created item (before
+     any modification). Tells us what `CreateNamedItemWithRolls` +
+     silent-source attach left behind.
+  2. WRITING — the wrapped chunk we're about to send to REAPER.
+  3. POST-WRITE READ-BACK — chunk re-read immediately after write.
+     Reveals any normalisation REAPER applies (MODE value coercion,
+     line endings, field re-ordering).
+  4. Various skip/no-op reasons (empty chunk, already wrapped,
+     SOURCE block not found, WriteItemChunk failure).
+
+- **`IsItemReversedViaChunk`** logs:
+  - Each unique chunk content seen (deduped by `std::hash`), up to
+    50 distinct chunks per session, with size + truncated content.
+  - For chunks containing `<SOURCE SECTION`: every `MODE <N>`
+    candidate found in the search range, the parsed integer, and
+    the `value & 2` result. So we can see WHAT MODE value REAPER
+    actually stores and whether the reverse bit is set.
+
+### How to use
+
+1. Enable debug logging:
+   - Open HoloRoll config UI → tick **Debug log**, or
+   - Edit `holoroll_config.ini` → set `debug.enabled = true`, reload.
+2. Open REAPER console: Actions → "Show console" or `View → Show
+   console`.
+3. Run `build_regions` with a reverse unit.
+4. Watch the console for `[holoroll-reverse]` lines. The PRE-WRAP +
+   WRITING + POST-WRITE READ-BACK trio tells us:
+   - Does the silent source attach produce `<SOURCE WAVE FILE "...">`?
+   - Does our wrap produce a valid `<SOURCE SECTION MODE 2 ...>` outer
+     block?
+   - What does REAPER store in MODE after re-serialisation?
+5. After a few seconds of OnTimer ticking (the playhead crossing
+   the reverse item), the IsItemReversedViaChunk dumps appear with
+   the parse decisions.
+
+### Caps
+
+- Up to 50 unique chunk dumps in IsItemReversedViaChunk per session
+  (to avoid runaway memory). After that the dedup-set stops
+  growing but parse-line logs continue for new chunks (other set).
+- Dumps truncated at 2000 bytes; full size noted in the log line.
+
+
 ## [0.14.0-alpha.7] — 2026-06-05
 
 Reverse-detection bitmask fix. alpha.5/.6 wrote the SECTION wrapper
@@ -2226,7 +2463,12 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.7...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.15.0-alpha.1...HEAD
+[0.15.0-alpha.1]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.15.0-alpha.1
+[0.14.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.11
+[0.14.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.10
+[0.14.0-alpha.9]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.9
+[0.14.0-alpha.8]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.8
 [0.14.0-alpha.7]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.7
 [0.14.0-alpha.6]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.6
 [0.14.0-alpha.5]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.5

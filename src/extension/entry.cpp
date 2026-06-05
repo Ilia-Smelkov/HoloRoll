@@ -5,10 +5,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <functional>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -1198,6 +1201,35 @@ void AttachSilentSourceToTake(MediaItem_Take* take) {
   // REAPER deletes the old source (if any) and refcounts the new one.
 }
 
+// v0.15.0-alpha.1: per-take playrate access.
+//
+// D_PLAYRATE on a take scales the rate at which the underlying source
+// is consumed. 1.0 = original speed. 0.5 = half speed (animation
+// stretches over twice the timeline). 2.0 = double speed. Combined
+// with item D_LENGTH it lets us "slow down" or "speed up" the
+// animation preview: the item visual length is anim_duration /
+// playrate, the source consumes anim_duration of content over that
+// stretched time. HoloRoll's preview-side ResolvePlayheadFromItems
+// undoes the scaling to find the right frame.
+void SetItemPlayrate(MediaItem* item, double playrate) {
+  if (!item) return;
+  const auto& api = g_bridge.Api();
+  if (!api.getActiveTake || !api.setMediaItemTakeInfo_Value) return;
+  MediaItem_Take* take = api.getActiveTake(item);
+  if (!take) return;
+  api.setMediaItemTakeInfo_Value(take, "D_PLAYRATE", playrate);
+}
+
+double GetItemPlayrate(MediaItem* item) {
+  if (!item) return 1.0;
+  const auto& api = g_bridge.Api();
+  if (!api.getActiveTake || !api.getMediaItemTakeInfo_Value) return 1.0;
+  MediaItem_Take* take = api.getActiveTake(item);
+  if (!take) return 1.0;
+  const double r = api.getMediaItemTakeInfo_Value(take, "D_PLAYRATE");
+  return r > 0.0 ? r : 1.0;
+}
+
 // Re-stamp an existing item's active take with silent source. Used in
 // build_regions to bring the export-placed source item up to the
 // alpha.6 baseline before forward-repositioning or reverse-cloning.
@@ -1236,54 +1268,108 @@ void ReStampItemWithSilentSource(MediaItem* item) {
 // Chunks are at most a few KB for HoloRoll items, so we allocate a
 // generous heap buffer per call (256 KB) and free it immediately.
 
-constexpr std::size_t kChunkBufferSize = 256 * 1024;  // 256 KB — HoloRoll items << 64 KB.
+// v0.14.0-alpha.9: chunks can run large (multi-take items, long FILE
+// paths). 4 MB is paranoia-level — typical HoloRoll chunks are 1-3 KB.
+constexpr std::size_t kChunkBufferSize = 4 * 1024 * 1024;  // 4 MB.
 
-// Read item's P_CHUNK. Returns empty string on failure. The chunk
-// returned is the REAPER-serialised representation of the item, ready
-// to be parsed line-by-line.
+// Read item's serialised state chunk via REAPER's canonical
+// GetSetItemStateChunk API. Falls back to GetSetMediaItemInfo_String
+// with "P_CHUNK" parmname if the canonical API isn't resolved (very
+// old REAPER builds). Returns empty string on failure.
+//
+// v0.14.0-alpha.9 change: switched primary path from
+// GetSetMediaItemInfo_String("P_CHUNK") to GetSetItemStateChunk. The
+// former is documented for short strings only (P_NAME / P_NOTES /
+// P_EXT:*) and silently returned false on chunk reads in observed
+// REAPER builds — manifested as "empty chunk -> false" log spam and
+// reverse detection never firing through alpha.5-.8.
 std::string ReadItemChunk(MediaItem* item) {
   if (!item) return {};
   const auto& api = g_bridge.Api();
-  if (!api.getSetMediaItemInfo_String) return {};
-  std::vector<char> buf(kChunkBufferSize, '\0');
-  if (!api.getSetMediaItemInfo_String(item, "P_CHUNK", buf.data(), false)) {
-    return {};
+
+  // One-shot diagnostic: log the FIRST attempt's outcome only. After
+  // that, ReadItemChunk runs silently regardless of result — it's
+  // called from EnumProjectItems on every OnTimer tick and would
+  // otherwise drown out the more useful per-event logs.
+  static std::atomic<bool> firstCallLogged{false};
+  const bool shouldLogFirst = g_debugEnabled.load() &&
+                              !firstCallLogged.exchange(true);
+
+  // Primary: GetItemStateChunk. 4-arg signature with explicit buffer
+  // size, modern REAPER SDK. Buffer initialised to zeros so the
+  // returned string is properly null-terminated even if REAPER doesn't
+  // explicitly null-terminate on its end.
+  if (api.getItemStateChunk) {
+    std::vector<char> buf(kChunkBufferSize, '\0');
+    const bool ok = api.getItemStateChunk(item, buf.data(),
+                                          static_cast<int>(buf.size()),
+                                          false);
+    if (shouldLogFirst) {
+      SpikeLog("[holoroll-reverse] ReadItemChunk first call: "
+               "GetItemStateChunk -> " +
+               std::string(ok ? "true" : "false") +
+               ", strlen=" + std::to_string(std::strlen(buf.data())) + "\n");
+    }
+    if (ok) return std::string(buf.data());
   }
-  return std::string(buf.data());
+
+  // Fallback: legacy GetSetMediaItemInfo_String("P_CHUNK"). Not
+  // documented to work on chunks but harmless to try as a last
+  // resort for very old REAPER builds.
+  if (api.getSetMediaItemInfo_String) {
+    std::vector<char> buf(kChunkBufferSize, '\0');
+    const bool ok = api.getSetMediaItemInfo_String(item, "P_CHUNK", buf.data(), false);
+    if (shouldLogFirst) {
+      SpikeLog("[holoroll-reverse] ReadItemChunk first call fallback: "
+               "GetSetMediaItemInfo_String(P_CHUNK) -> " +
+               std::string(ok ? "true" : "false") +
+               ", strlen=" + std::to_string(std::strlen(buf.data())) + "\n");
+    }
+    if (ok) return std::string(buf.data());
+  }
+
+  if (shouldLogFirst) {
+    SpikeLog("[holoroll-reverse] ReadItemChunk first call: all paths failed "
+             "(both getItemStateChunk and getSetMediaItemInfo_String "
+             "either nullptr or returned false)\n");
+  }
+  return {};
 }
 
-// Write item's P_CHUNK. Returns true on success. REAPER re-parses the
-// chunk and updates internal state accordingly — used to apply
-// modifications (POSITION, NAME, SECTION-wrap) atomically.
+// Write item's state chunk. REAPER re-parses the chunk and updates
+// internal state accordingly — used to apply modifications (POSITION,
+// NAME, SECTION-wrap) atomically.
 bool WriteItemChunk(MediaItem* item, const std::string& chunk) {
   if (!item || chunk.empty()) return false;
   const auto& api = g_bridge.Api();
-  if (!api.getSetMediaItemInfo_String) return false;
-  // GetSet API takes a non-const char*. Copy into a local buffer.
+
+  // Working buffer with explicit null terminator.
   std::vector<char> buf(chunk.begin(), chunk.end());
   buf.push_back('\0');
-  return api.getSetMediaItemInfo_String(item, "P_CHUNK", buf.data(), true);
+
+  // WriteItemChunk is only called from SetItemReverseViaChunk, which
+  // already logs its own context (PRE-WRAP / WRITING / POST-WRITE).
+  // No per-call write log here — keeps the trail focused.
+  if (api.setItemStateChunk) {
+    return api.setItemStateChunk(item, buf.data(), false);
+  }
+  if (api.getSetMediaItemInfo_String) {
+    return api.getSetMediaItemInfo_String(item, "P_CHUNK", buf.data(), true);
+  }
+  return false;
 }
 
 // True if the item's chunk represents REAPER's section/reverse state.
 //
-// v0.14.0-alpha.7 fix: MODE inside a SOURCE SECTION block is a BITMASK,
-// not a discrete value. The bits we care about:
-//   bit 0 (val 1): "use section bounds" — set when user enabled the
-//                  Section checkbox (or LENGTH/STARTPOS were customised).
+// MODE inside a SOURCE SECTION block is a BITMASK, not a discrete
+// value. Bits we care about:
+//   bit 0 (val 1): "use section bounds" (Section checkbox).
 //   bit 1 (val 2): reverse direction.
-//   higher bits:   loop, fade modes, etc. — irrelevant for our check.
+//   higher bits:   loop, fade modes, etc. — irrelevant.
+// We accept any MODE value with bit 1 set: 2, 3, 6, 7, ...
 //
-// alpha.5/.6 wrote `MODE 2` (reverse-only). REAPER accepted that and
-// displayed both Section + Reverse checkboxes checked in Item Properties
-// — but on serialisation back it normalised to `MODE 3` (bit 0 | bit 1)
-// because the Section checkbox was effectively engaged. The alpha.5/.6
-// substring check for literal "MODE 2" therefore never matched on
-// re-read, so isReverse stayed false and preview played forwards.
-//
-// alpha.7 parses the integer after `MODE ` within the SECTION block and
-// tests `value & 2`. Robust to any MODE value with the reverse bit set:
-// 2, 3, 6, 7, etc.
+// Called on every OnTimer tick × every HoloRoll item, so kept tight:
+// no logging on the hot path.
 bool IsItemReversedViaChunk(MediaItem* item) {
   const std::string chunk = ReadItemChunk(item);
   if (chunk.empty()) return false;
@@ -1293,8 +1379,7 @@ bool IsItemReversedViaChunk(MediaItem* item) {
 
   // Cheap upper bound on how far past the opener we'll search for the
   // MODE line. HoloRoll SECTION blocks are <300 bytes; 4 KB allows for
-  // exotic chunks (long FILE paths, extra metadata) without scanning
-  // the entire chunk.
+  // exotic chunks without scanning the entire body.
   const std::size_t searchEnd = std::min(chunk.size(), sectionPos + 4096);
 
   std::size_t pos = sectionPos;
@@ -1430,9 +1515,9 @@ std::string WrapSourceInSectionReverse(const std::string& chunk,
 bool SetItemReverseViaChunk(MediaItem* item, double sourceLength) {
   std::string chunk = ReadItemChunk(item);
   if (chunk.empty()) return false;
-  if (chunk.find("<SOURCE SECTION") != std::string::npos) return true;
+  if (chunk.find("<SOURCE SECTION") != std::string::npos) return true;  // already wrapped.
   const std::string wrapped = WrapSourceInSectionReverse(chunk, sourceLength);
-  if (wrapped == chunk) return false;  // nothing to wrap.
+  if (wrapped == chunk) return false;  // no SOURCE block to wrap.
   return WriteItemChunk(item, wrapped);
 }
 
@@ -1765,7 +1850,8 @@ bool WriteMotionEnvelopeForBone(MediaTrack* track, int fxIdx, int paramIdx,
                                 const std::vector<float>& motion,
                                 double itemStartSec, double fps,
                                 float sharedMin, float sharedMax,
-                                bool reversed = false) {
+                                bool reversed = false,
+                                double playrate = 1.0) {
   const auto& api = g_bridge.Api();
   if (!api.getFXEnvelope || !api.insertEnvelopePoint ||
       !api.envelope_SortPoints || !api.deleteEnvelopePointRange) {
@@ -1777,7 +1863,10 @@ bool WriteMotionEnvelopeForBone(MediaTrack* track, int fxIdx, int paramIdx,
   if (!env) return false;
 
   const std::size_t nFrames = motion.size();
-  const double durationSec = static_cast<double>(nFrames) / fps;
+  // v0.15.0-alpha.1: at playrate=0.5 the source spans 2x the timeline,
+  // so the envelope spans (nFrames / fps) / playrate seconds.
+  const double effRate = (playrate > 0.0) ? playrate : 1.0;
+  const double durationSec = static_cast<double>(nFrames) / (fps * effRate);
   const double clearStart = itemStartSec;
   const double clearEnd = itemStartSec + durationSec;
 
@@ -1800,9 +1889,11 @@ bool WriteMotionEnvelopeForBone(MediaTrack* track, int fxIdx, int paramIdx,
   // v0.14.0-alpha.5: when reversed, sample motion[] from the end —
   // motion[total-1-f] — so the envelope visualises the same backwards
   // motion that REAPER is playing audio-wise.
+  // v0.15.0-alpha.1: per-point time stretched by 1/playrate. Each
+  // source frame is at a wider timeline interval at slow playrates.
   bool noSort = true;
   for (std::size_t f = 0; f < nFrames; ++f) {
-    const double t = itemStartSec + static_cast<double>(f) / fps;
+    const double t = itemStartSec + static_cast<double>(f) / (fps * effRate);
     const std::size_t srcF = reversed ? (nFrames - 1 - f) : f;
     // Min-max stretch into [0, 1]. Clamp defensively for outlier
     // frames (those below 5th or above 95th percentile).
@@ -1837,7 +1928,8 @@ bool WriteMotionEnvelopeForBone(MediaTrack* track, int fxIdx, int paramIdx,
 void WriteMotionEnvelopesForItem(MediaTrack* motionTrack, int fxIdx,
                                  const LoadedAnimation& anim,
                                  double itemStartSec, double fps,
-                                 bool reversed = false) {
+                                 bool reversed = false,
+                                 double playrate = 1.0) {
   if (anim.worldMotion.empty()) return;
   const std::vector<std::size_t> topBones = TopNActiveBones(anim.worldMotion, kMotionTopN);
   if (topBones.empty()) return;
@@ -1871,7 +1963,7 @@ void WriteMotionEnvelopesForItem(MediaTrack* motionTrack, int fxIdx,
                                anim.worldMotion[boneIdx],
                                itemStartSec, fps,
                                sharedMin, sharedMax,
-                               reversed);
+                               reversed, playrate);
   }
 }
 
@@ -1962,6 +2054,11 @@ struct DiscoveredItem {
   // computation in ResolvePlayheadFromItems so the 3D preview plays
   // the animation backwards in sync with the audio.
   bool isReverse = false;
+  // v0.15.0-alpha.1: take's D_PLAYRATE. 1.0 = normal speed. 0.5 = half
+  // speed (slowdown 2x — animation stretches over 2x the timeline).
+  // Used in ResolvePlayheadFromItems to map localTime to source-frame
+  // index correctly when the item plays at non-unit speed.
+  double playrate = 1.0;
 };
 
 // Walk every track in the project, then every item on each track, and return
@@ -2004,6 +2101,8 @@ std::vector<DiscoveredItem> EnumProjectItems() {
       // HoloRoll items have ~1-3 KB chunks and substring search is
       // O(n) — fine for the ~tens of items typical in a project.
       di.isReverse = IsItemReversedViaChunk(item);
+      // v0.15.0-alpha.1: take playrate for slowdown.
+      di.playrate = GetItemPlayrate(item);
       out.push_back(std::move(di));
     }
   }
@@ -2117,9 +2216,16 @@ ItemResolveResult ResolvePlayheadFromItems(double playheadSeconds,
     // (clamp to frame 0 [forward] / last frame [reverse]). Beyond
     // duration -> in post-roll buffer (clamp to last frame [forward] /
     // frame 0 [reverse]).
-    const double localTime = playheadSeconds - best->startSeconds;
-    const double lastFrame = static_cast<double>(totalFrames - 1);
-    double f = std::floor(localTime * fps);
+    //
+    // v0.15.0-alpha.1: playrate scales how fast the source is
+    // consumed. With playrate=0.5 (slowdown 2x), 1 second of timeline
+    // = 0.5 seconds of source. We multiply localTime by playrate
+    // before mapping to frame index. Default playrate=1.0 makes this
+    // a no-op for items without slowdown.
+    const double localTime    = playheadSeconds - best->startSeconds;
+    const double sourceTime   = localTime * best->playrate;
+    const double lastFrame    = static_cast<double>(totalFrames - 1);
+    double f = std::floor(sourceTime * fps);
     // v0.14.0-alpha.5: reverse mirrors the timebase around the
     // animation's centre. Pre-roll then shows the LAST frame (the
     // first frame in reverse playback) and post-roll shows frame 0.
@@ -3005,8 +3111,18 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
     // this one in `units`) is the one that takes ownership of the
     // source's position.
     const bool reverseUnit = unit.value("reverse", false);
+    // v0.15.0-alpha.1: per-unit playrate. 1.0 = original speed
+    // (default — no-op). 0.5 = 2x slowdown (animation stretches over
+    // 2x the timeline). 2.0 = 2x speedup. Applied to all variations
+    // of the unit. Invalid (<=0) values cause the unit to skip.
+    const double playrate = unit.value("playrate", 1.0);
     if (anim.empty()) {
       skipped.push_back({{"anim", anim}, {"reason", "empty 'anim'"}});
+      continue;
+    }
+    if (playrate <= 0.0) {
+      skipped.push_back({{"anim", anim},
+                         {"reason", "playrate must be > 0"}});
       continue;
     }
 
@@ -3062,11 +3178,18 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
       continue;
     }
 
-    // Item length is queried once — used for the original repositioned
-    // item AND all duplicates. We assume variations share the same
-    // length (which is the case: HoloRoll items carry an animation's
-    // exact duration via CreateNamedItemWithRolls).
-    const double il = api.getMediaItemInfo_Value(discoveredItem, "D_LENGTH");
+    // v0.15.0-alpha.1: compute stretched length from animation
+    // metadata + per-unit playrate. anim_duration = nFrames / fps
+    // (source-time duration). il = anim_duration / playrate (timeline-
+    // time duration). For default playrate=1.0 il == anim_duration so
+    // pre-alpha.1 behaviour is preserved exactly.
+    const std::uint32_t nFrames = animObj.TotalFrames();
+    const double animDurationSec = (nFrames > 0)
+        ? static_cast<double>(nFrames) / fps
+        : api.getMediaItemInfo_Value(discoveredItem, "D_LENGTH");
+    const double il = (animDurationSec > 0.0)
+        ? animDurationSec / playrate
+        : api.getMediaItemInfo_Value(discoveredItem, "D_LENGTH");
 
     // v0.14.0-alpha.6: re-stamp the export-placed source item with
     // silent audio so it matches the baseline of items WE create.
@@ -3117,6 +3240,11 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
           continue;
         }
 
+        // v0.15.0-alpha.1: apply slowdown BEFORE SECTION wrap so the
+        // chunk we read for wrapping has D_PLAYRATE baked into the
+        // PLAYRATE field.
+        SetItemPlayrate(clone, playrate);
+
         // Wrap the silent source in SECTION/MODE 2 so REAPER plays it
         // backwards. SetItemReverseViaChunk reads the just-created
         // chunk (which now has <SOURCE WAVE FILE "...silence.wav">),
@@ -3135,7 +3263,7 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
           // Envelope sampled in reverse direction so the visualisation
           // tracks the audio's backwards playback.
           WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps,
-                                      /*reversed=*/true);
+                                      /*reversed=*/true, playrate);
         }
 
         const double regionStart = pos;
@@ -3143,23 +3271,28 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
         api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
                               regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
         created.push_back({
-            {"name",    regionName},
-            {"start",   regionStart},
-            {"end",     regionEnd},
-            {"reverse", true},
+            {"name",     regionName},
+            {"start",    regionStart},
+            {"end",      regionEnd},
+            {"reverse",  true},
+            {"playrate", playrate},
         });
         pos = regionEnd + gap;
       }
     } else {
-      // ---- Forward path (unchanged from alpha.3 except now in else) ----
+      // ---- Forward path (alpha.3, alpha.6 silent re-stamp, alpha.1 playrate) ----
 
-      // Reposition the discovered item to current pos. Re-write envelopes
-      // at the new range so they follow the item.
+      // v0.15.0-alpha.1: overwrite source's D_LENGTH to match stretched
+      // length, set playrate on its take. Reposition to current pos.
       if (api.setMediaItemInfo_Value) {
         api.setMediaItemInfo_Value(discoveredItem, "D_POSITION", pos);
+        api.setMediaItemInfo_Value(discoveredItem, "D_LENGTH", il);
       }
+      SetItemPlayrate(discoveredItem, playrate);
+
       if (loc.fxIdx >= 0) {
-        WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
+        WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps,
+                                    /*reversed=*/false, playrate);
       }
 
       // Variation 1: wrap the repositioned original item.
@@ -3170,9 +3303,10 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
         api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
                               regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
         created.push_back({
-            {"name",  regionName},
-            {"start", regionStart},
-            {"end",   regionEnd},
+            {"name",     regionName},
+            {"start",    regionStart},
+            {"end",      regionEnd},
+            {"playrate", playrate},
         });
         pos = regionEnd + gap;
       }
@@ -3201,8 +3335,12 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
           continue;
         }
 
+        // v0.15.0-alpha.1: apply playrate to the duplicate's take.
+        SetItemPlayrate(dup, playrate);
+
         if (loc.fxIdx >= 0) {
-          WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps);
+          WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps,
+                                      /*reversed=*/false, playrate);
         }
 
         const double regionStart = pos;
@@ -3210,9 +3348,10 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
         api.addProjectMarker2(nullptr, /*isrgn=*/true, regionStart, regionEnd,
                               regionName.c_str(), /*wantidx=*/-1, /*color=*/0);
         created.push_back({
-            {"name",  regionName},
-            {"start", regionStart},
-            {"end",   regionEnd},
+            {"name",     regionName},
+            {"start",    regionStart},
+            {"end",      regionEnd},
+            {"playrate", playrate},
         });
         pos = regionEnd + gap;
       }
@@ -3298,6 +3437,30 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
   if (SilenceWavPath().empty()) {
     ConsoleLog("[holoroll] WARNING: silence.wav generation failed; "
                "SECTION-reverse will not work on this session.\n");
+  }
+
+  // v0.14.0-alpha.10: one-shot API resolution audit for the reverse
+  // mechanism. Tells us at plugin load whether GetFunc resolved the
+  // canonical chunk API + the silent-source attach APIs. Gated by
+  // g_debugEnabled — visible only with debug log on. If any of these
+  // are nullptr, reverse simply won't work and we can stop chasing
+  // ghosts in the chunk parser.
+  if (g_debugEnabled.load()) {
+    const auto& api = g_bridge.Api();
+    auto yn = [](bool b) { return b ? "yes" : "NO"; };
+    SpikeLog(std::string("[holoroll-reverse] API audit on init:\n") +
+             "  GetItemStateChunk resolved: " +
+                 yn(api.getItemStateChunk != nullptr) + "\n" +
+             "  SetItemStateChunk resolved: " +
+                 yn(api.setItemStateChunk != nullptr) + "\n" +
+             "  GetSetMediaItemInfo_String resolved: " +
+                 yn(api.getSetMediaItemInfo_String != nullptr) + "\n" +
+             "  PCM_Source_CreateFromFile resolved: " +
+                 yn(api.pcm_Source_CreateFromFile != nullptr) + "\n" +
+             "  SetMediaItemTake_Source resolved: " +
+                 yn(api.setMediaItemTake_Source != nullptr) + "\n" +
+             "  silence.wav path: " +
+                 (SilenceWavPath().empty() ? "<EMPTY>" : SilenceWavPath()) + "\n");
   }
 
   // v0.9.0: initialise OLE so we can register drop targets on our viewport.

@@ -382,6 +382,23 @@ bool WinHttpDownloadToFile(const std::wstring& url, const std::string& destPath)
 // ---- Worker thread body --------------------------------------------------
 
 void WorkerMain() {
+  // v0.14.0-alpha.10: stamp lastCheck unconditionally at the START of
+  // every poll. Previously we only stamped on success — any failure
+  // path (network down, JSON parse error, missing tag_name, version
+  // already up to date) left lastCheck stale, so Tick re-fired
+  // WorkerMain on every OnTimer (~30 Hz). Manifested as log spam:
+  // up to 30 lines per second of "no network" / "missing tag_name" /
+  // "up to date" while the user tried to test something else.
+  //
+  // Side effect: failed polls now wait the full 24h cooldown before
+  // auto-retrying. CheckNow() bypasses the cooldown for manual
+  // retries, so this doesn't trap the user.
+  {
+    ConfigStore& cfg = holoroll_config_ref();
+    cfg.SetDouble(kCfgLastCheckUnix, static_cast<double>(std::time(nullptr)));
+    cfg.Save();
+  }
+
   const std::string releasesUrl =
       std::string("https://api.github.com/repos/") + kRepoOwner + "/" +
       kRepoName + "/releases/latest";

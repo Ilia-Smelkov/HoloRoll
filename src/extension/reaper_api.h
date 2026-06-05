@@ -156,6 +156,42 @@ using PreventUIRefreshFn       = void (*)(int prevent_count);
 using AddRemoveReaScriptFn     = int (*)(bool isAdd, int sectionID,
                                          const char* scriptfn, bool commit);
 
+// ---- v0.14.0-alpha.11 canonical chunk API (split Get/Set) -----------------
+//
+// Modern REAPER SDK exposes item-chunk access via two separate
+// functions, not the deprecated unified `GetSetItemStateChunk`:
+//
+//   bool GetItemStateChunk(MediaItem* item, char* strNeedBig,
+//                          int strNeedBig_sz, bool isundoOptional);
+//   bool SetItemStateChunk(MediaItem* item, const char* str,
+//                          bool isundoOptional);
+//
+// alpha.9 bound the obsolete name `GetSetItemStateChunk` and GetFunc
+// returned nullptr because that symbol doesn't exist in current
+// REAPER builds — manifested in alpha.9/.10 as the audit/diagnostic
+// reporting "all paths failed" for ReadItemChunk.
+//
+// We also fall back to `GetSetMediaItemInfo_String("P_CHUNK")` for
+// very old REAPER builds, even though P_CHUNK isn't officially
+// supported for that function.
+using GetItemStateChunkFn = bool (*)(MediaItem* item, char* strNeedBig,
+                                     int strNeedBig_sz, bool isundo);
+using SetItemStateChunkFn = bool (*)(MediaItem* item, const char* str,
+                                     bool isundo);
+
+// ---- v0.15.0-alpha.1 take Info_Value (D_PLAYRATE for slowdown) ----------
+//
+// Slowdown/speedup is implemented via REAPER's per-take D_PLAYRATE
+// (1.0 = original speed, 0.5 = half speed = 2x slowdown). Setting it
+// on a take affects how the source is consumed inside the item;
+// HoloRoll combines this with reverse + frame-time mapping in
+// ResolvePlayheadFromItems.
+using SetMediaItemTakeInfo_ValueFn = bool (*)(MediaItem_Take* take,
+                                              const char* parmname,
+                                              double newvalue);
+using GetMediaItemTakeInfo_ValueFn = double (*)(MediaItem_Take* take,
+                                                const char* parmname);
+
 // ---- v0.14.0-alpha.6 silent-source attachment (SECTION-reverse mechanism) -
 //
 // Reverse playback in REAPER goes through a <SOURCE SECTION ... MODE 2>
@@ -263,6 +299,16 @@ struct ReaperApi {
   // v0.14.0-alpha.6: silent-source attachment for SECTION/MODE 2 reverse.
   PCM_Source_CreateFromFileFn pcm_Source_CreateFromFile = nullptr;
   SetMediaItemTake_SourceFn   setMediaItemTake_Source = nullptr;
+
+  // v0.15.0-alpha.1: per-take playrate for slowdown feature.
+  SetMediaItemTakeInfo_ValueFn setMediaItemTakeInfo_Value = nullptr;
+  GetMediaItemTakeInfo_ValueFn getMediaItemTakeInfo_Value = nullptr;
+
+  // v0.14.0-alpha.11: canonical item-chunk API — split into two
+  // functions to match modern REAPER SDK. alpha.9's
+  // `getSetItemStateChunk` symbol does not exist in current builds.
+  GetItemStateChunkFn getItemStateChunk = nullptr;
+  SetItemStateChunkFn setItemStateChunk = nullptr;
 
   // v0.12.0-alpha.15: socket bridge — register_action, script_shortcut,
   // assign_shortcut, get_cursor verbs.
