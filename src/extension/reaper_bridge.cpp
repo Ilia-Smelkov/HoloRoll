@@ -79,6 +79,13 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.preventUIRefresh        = reinterpret_cast<PreventUIRefreshFn>(rec->GetFunc("PreventUIRefresh"));
   api.addRemoveReaScript      = reinterpret_cast<AddRemoveReaScriptFn>(rec->GetFunc("AddRemoveReaScript"));
 
+  // v0.14.0-alpha.6: silent-source attachment so SECTION/MODE 2 has a
+  // real underlying PCM_source to wrap. Required for the section/reverse
+  // mechanism to be mechanically valid; HoloRoll items previously had
+  // empty takes, which made the SECTION wrap a no-op.
+  api.pcm_Source_CreateFromFile = reinterpret_cast<PCM_Source_CreateFromFileFn>(rec->GetFunc("PCM_Source_CreateFromFile"));
+  api.setMediaItemTake_Source   = reinterpret_cast<SetMediaItemTake_SourceFn>(rec->GetFunc("SetMediaItemTake_Source"));
+
   // v0.12.0-alpha.15: socket bridge — action registration / shortcut
   // introspection / edit cursor.
   api.reverseNamedCommandLookup = reinterpret_cast<ReverseNamedCommandLookupFn>(rec->GetFunc("ReverseNamedCommandLookup"));

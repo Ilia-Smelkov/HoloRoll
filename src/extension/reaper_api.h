@@ -156,6 +156,21 @@ using PreventUIRefreshFn       = void (*)(int prevent_count);
 using AddRemoveReaScriptFn     = int (*)(bool isAdd, int sectionID,
                                          const char* scriptfn, bool commit);
 
+// ---- v0.14.0-alpha.6 silent-source attachment (SECTION-reverse mechanism) -
+//
+// Reverse playback in REAPER goes through a <SOURCE SECTION ... MODE 2>
+// chunk wrapper around the active take's audio source. Without an
+// underlying PCM_source (i.e. on empty takes) the wrapper is a no-op:
+// REAPER has nothing to play backwards. alpha.6 attaches a tiny silent
+// WAV (5 minutes, 8 kHz mono 16-bit) as the source for every HoloRoll-
+// created item, so SECTION/MODE 2 wrapping is mechanically valid even
+// though the audio itself is silence. The user hears nothing either
+// way; what matters is that REAPER's GUI reflects the reverse state
+// (Item Properties → Section/Reverse checkbox checked) and the chunk
+// substring scan in IsItemReversedViaChunk can detect it.
+using PCM_Source_CreateFromFileFn = PCM_source* (*)(const char* filename);
+using SetMediaItemTake_SourceFn = bool (*)(MediaItem_Take* take, PCM_source* source);
+
 // ---- v0.12.0-alpha.15 socket-bridge APIs (register / shortcut / cursor) -
 //
 // register_action returns a string named command id (e.g. "_RS1234abcd")
@@ -244,6 +259,10 @@ struct ReaperApi {
   Undo_EndBlockFn          undo_EndBlock = nullptr;
   PreventUIRefreshFn       preventUIRefresh = nullptr;
   AddRemoveReaScriptFn     addRemoveReaScript = nullptr;
+
+  // v0.14.0-alpha.6: silent-source attachment for SECTION/MODE 2 reverse.
+  PCM_Source_CreateFromFileFn pcm_Source_CreateFromFile = nullptr;
+  SetMediaItemTake_SourceFn   setMediaItemTake_Source = nullptr;
 
   // v0.12.0-alpha.15: socket bridge — register_action, script_shortcut,
   // assign_shortcut, get_cursor verbs.

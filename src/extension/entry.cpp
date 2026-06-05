@@ -2,7 +2,9 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -1058,6 +1060,161 @@ bool IsHoloRollItem(MediaItem* item) {
   return buf[0] != '\0';
 }
 
+// ---- v0.14.0-alpha.6 silent audio source (SECTION-reverse backbone) -----
+//
+// REAPER's section/reverse mechanism needs an actual PCM_source under
+// the <SOURCE SECTION MODE 2> wrapper — wrapping an Empty Source is a
+// no-op (nothing to reverse). We solve this by attaching a small silent
+// WAV to every HoloRoll item: forward and reverse items alike, plus
+// the source item the export pipeline places (re-stamped on first
+// touch in build_regions). All items become uniformly section-wrap-
+// capable. The audio itself is silence, so playback in the timeline
+// stays inaudible — what matters is that REAPER's GUI reflects the
+// reverse state and IsItemReversedViaChunk can detect it.
+//
+// File layout:
+//   %APPDATA%\REAPER\UserPlugins\HoloRollAudio\silence.wav
+//   5 minutes × 8 kHz × mono × 16-bit PCM = ~4.8 MB on disk.
+// Generated lazily on first call to SilenceWavPath() (REAPER plugin
+// init triggers it explicitly, see REAPER_PLUGIN_ENTRYPOINT). The
+// 5-minute paranoia length covers any animation clip we'd plausibly
+// see — animations longer than this would have other problems anyway.
+
+constexpr uint32_t kSilenceSampleRate    = 8000;
+constexpr uint16_t kSilenceBitsPerSample = 16;
+constexpr uint16_t kSilenceChannels      = 1;
+constexpr uint32_t kSilenceDurationSec   = 300;  // 5 minutes.
+
+// Resolve %APPDATA%\REAPER\UserPlugins\HoloRollAudio\silence.wav. Creates
+// the HoloRollAudio directory if missing (CreateDirectoryA is idempotent
+// on existing dirs).
+std::string ComputeSilenceWavPath() {
+  const char* appdata = std::getenv("APPDATA");
+  if (!appdata) return {};
+  std::string dir = std::string(appdata) + "\\REAPER\\UserPlugins\\HoloRollAudio";
+  CreateDirectoryA(dir.c_str(), nullptr);
+  return dir + "\\silence.wav";
+}
+
+// Write a fresh silent WAV file at `path`. RIFF/WAVE PCM with the
+// constants above. Returns true on full success. Called only when the
+// existing file is missing or has the wrong size (idempotent guard
+// in SilenceWavPath()).
+bool WriteSilenceWav(const std::string& path) {
+  const uint32_t bytesPerSample = kSilenceBitsPerSample / 8;
+  const uint32_t blockAlign     = kSilenceChannels * bytesPerSample;
+  const uint32_t byteRate       = kSilenceSampleRate * blockAlign;
+  const uint32_t dataSize       = kSilenceSampleRate * kSilenceDurationSec * blockAlign;
+  const uint32_t riffSize       = 36 + dataSize;  // file size minus 8.
+
+  HANDLE fh = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (fh == INVALID_HANDLE_VALUE) return false;
+
+  // Local writers — little-endian native on Windows x64 matches WAV.
+  auto writeBytes = [&](const void* data, DWORD n) {
+    DWORD written = 0;
+    return WriteFile(fh, data, n, &written, nullptr) && written == n;
+  };
+  auto writeU16 = [&](uint16_t v) { return writeBytes(&v, 2); };
+  auto writeU32 = [&](uint32_t v) { return writeBytes(&v, 4); };
+
+  bool ok = true;
+  ok = ok && writeBytes("RIFF", 4);
+  ok = ok && writeU32(riffSize);
+  ok = ok && writeBytes("WAVE", 4);
+  ok = ok && writeBytes("fmt ", 4);
+  ok = ok && writeU32(16);                  // PCM fmt chunk size.
+  ok = ok && writeU16(1);                   // PCM format tag.
+  ok = ok && writeU16(kSilenceChannels);
+  ok = ok && writeU32(kSilenceSampleRate);
+  ok = ok && writeU32(byteRate);
+  ok = ok && writeU16(static_cast<uint16_t>(blockAlign));
+  ok = ok && writeU16(kSilenceBitsPerSample);
+  ok = ok && writeBytes("data", 4);
+  ok = ok && writeU32(dataSize);
+
+  if (ok) {
+    // PCM samples: 16-bit signed, silence == 0x0000. Write 64 KB at a
+    // time so we don't allocate the whole 4.8 MB buffer up front.
+    std::vector<char> zeros(64 * 1024, 0);
+    uint32_t remaining = dataSize;
+    while (ok && remaining > 0) {
+      const DWORD chunkSize = static_cast<DWORD>(
+          std::min(static_cast<uint32_t>(zeros.size()), remaining));
+      ok = writeBytes(zeros.data(), chunkSize);
+      remaining -= chunkSize;
+    }
+  }
+
+  CloseHandle(fh);
+  if (!ok) {
+    DeleteFileA(path.c_str());  // Don't leave a half-written file behind.
+  }
+  return ok;
+}
+
+// Cached path to silence.wav. First call materialises the file on
+// disk if missing or wrong-sized; subsequent calls are O(1). Returns
+// empty string if APPDATA is unset or file creation failed (defensive
+// — every caller is null-checked).
+const std::string& SilenceWavPath() {
+  static const std::string cached = []() -> std::string {
+    std::string p = ComputeSilenceWavPath();
+    if (p.empty()) return {};
+    // Idempotent guard: skip rewrite if file exists with expected size.
+    const uint32_t bytesPerSample = kSilenceBitsPerSample / 8;
+    const uint32_t dataSize       = kSilenceSampleRate * kSilenceDurationSec *
+                                    kSilenceChannels * bytesPerSample;
+    const uint32_t expected       = 44 + dataSize;
+    HANDLE h = CreateFileA(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+      const DWORD sz = GetFileSize(h, nullptr);
+      CloseHandle(h);
+      if (sz == expected) return p;  // Already in place.
+    }
+    if (!WriteSilenceWav(p)) return {};
+    return p;
+  }();
+  return cached;
+}
+
+// Attach the silent source to a take. Idempotent — calling on a take
+// that already has a source replaces it with silence (intentional: the
+// "забиваем на backward compatibility" decision means we always
+// normalise to the silent baseline). Silent on failure (most likely
+// cause: silence.wav couldn't be generated).
+void AttachSilentSourceToTake(MediaItem_Take* take) {
+  if (!take) return;
+  const auto& api = g_bridge.Api();
+  if (!api.pcm_Source_CreateFromFile || !api.setMediaItemTake_Source) return;
+  const std::string& path = SilenceWavPath();
+  if (path.empty()) return;
+  PCM_source* src = api.pcm_Source_CreateFromFile(path.c_str());
+  if (!src) return;
+  api.setMediaItemTake_Source(take, src);
+  // PCM_source ownership: SetMediaItemTake_Source takes ownership.
+  // REAPER deletes the old source (if any) and refcounts the new one.
+}
+
+// Re-stamp an existing item's active take with silent source. Used in
+// build_regions to bring the export-placed source item up to the
+// alpha.6 baseline before forward-repositioning or reverse-cloning.
+void ReStampItemWithSilentSource(MediaItem* item) {
+  if (!item) return;
+  const auto& api = g_bridge.Api();
+  if (!api.getActiveTake) return;
+  MediaItem_Take* take = api.getActiveTake(item);
+  if (!take) {
+    // Item without an active take — add one. This shouldn't happen for
+    // items the export pipeline placed (REAPER always creates a take
+    // alongside an item), but the helper is defensively safe.
+    if (api.addTakeToMediaItem) take = api.addTakeToMediaItem(item);
+  }
+  AttachSilentSourceToTake(take);
+}
+
 // ---- v0.14.0-alpha.5 chunk helpers (section/reverse mechanism) ----------
 //
 // REAPER stores per-take reverse as a `<SOURCE SECTION ... MODE 2
@@ -1229,9 +1386,10 @@ std::string WrapSourceInSectionReverse(const std::string& chunk,
 
 // Apply SECTION/MODE 2 wrapping in-place to an existing item. Returns
 // true if the chunk was modified (or was already in reverse mode).
-// Used after CloneItemAtPosition's chunk-copy to flip the new item
-// into reverse playback without round-tripping through a SOURCE
-// reconstruction.
+// Called by `build_regions` reverse path after CreateNamedItemWithRolls
+// places the new item with silent audio source: this helper then flips
+// it into reverse playback by wrapping the <SOURCE WAVE> in a
+// <SOURCE SECTION ... MODE 2> outer block.
 bool SetItemReverseViaChunk(MediaItem* item, double sourceLength) {
   std::string chunk = ReadItemChunk(item);
   if (chunk.empty()) return false;
@@ -1241,104 +1399,13 @@ bool SetItemReverseViaChunk(MediaItem* item, double sourceLength) {
   return WriteItemChunk(item, wrapped);
 }
 
-// ---- v0.14.0-alpha.5 chunk-level item cloning ---------------------------
-//
-// Make a new item on dstTrack by duplicating src's serialised chunk,
-// then rewriting POSITION (place at `pos`), replacing the take name,
-// stripping IGUID/GUID/IID lines so REAPER assigns fresh IDs on
-// reparse, and — if reverseAudio is true — wrapping the SOURCE block
-// in SECTION MODE 2. The result has the same audio source as the
-// original (REAPER reference-counts PCM_sources, so the file on disk
-// is never copied), the requested name, and the requested reverse
-// state.
-//
-// Why chunk-clone instead of AddMediaItemToTrack + manual configure:
-// the SECTION wrapper lives ONLY inside the chunk — there's no
-// public API to construct a SECTION PCM_source from scratch. Cloning
-// the chunk and editing in place is the only way to get
-// SECTION/MODE 2 onto a new item.
-MediaItem* CloneItemAtPosition(MediaItem* src, MediaTrack* dstTrack,
-                               double pos, const std::string& name,
-                               bool reverseAudio, double sourceLength) {
-  if (!src || !dstTrack) return nullptr;
-  const auto& api = g_bridge.Api();
-  if (!api.addMediaItemToTrack || !api.getSetMediaItemInfo_String) return nullptr;
-
-  std::string srcChunk = ReadItemChunk(src);
-  if (srcChunk.empty()) return nullptr;
-
-  // --- Rewrite chunk -------------------------------------------------
-  std::istringstream iss(srcChunk);
-  std::ostringstream oss;
-  std::string line;
-  bool positionReplaced = false;
-  bool nameReplaced = false;
-
-  auto trimLeading = [](const std::string& s) {
-    std::size_t i = 0;
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-    return s.substr(i);
-  };
-  auto leadingWhitespace = [](const std::string& s) {
-    std::size_t i = 0;
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-    return s.substr(0, i);
-  };
-
-  while (std::getline(iss, line)) {
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    const std::string body = trimLeading(line);
-
-    // Drop IGUID/GUID/IID — REAPER will generate fresh ones on reparse.
-    // Without this, the new item collides with the source on undo/redo.
-    if (body.rfind("IGUID ", 0) == 0 ||
-        body.rfind("GUID ",  0) == 0 ||
-        body.rfind("IID ",   0) == 0) {
-      continue;
-    }
-
-    // Rewrite POSITION (first occurrence only — top-level item position).
-    if (!positionReplaced && body.rfind("POSITION ", 0) == 0) {
-      char numBuf[64];
-      std::snprintf(numBuf, sizeof(numBuf), "%.14g", pos);
-      oss << leadingWhitespace(line) << "POSITION " << numBuf << "\n";
-      positionReplaced = true;
-      continue;
-    }
-
-    // Rewrite take NAME (first occurrence — active take of the source).
-    // REAPER chunk format uses NAME "..." with quotes; we replicate that.
-    if (!nameReplaced && body.rfind("NAME ", 0) == 0) {
-      oss << leadingWhitespace(line) << "NAME \"" << name << "\"\n";
-      nameReplaced = true;
-      continue;
-    }
-
-    oss << line << "\n";
-  }
-  std::string modified = oss.str();
-
-  // Wrap SOURCE in SECTION/MODE 2 if reverse requested. Done AFTER
-  // POSITION/NAME edits so the wrapping pass doesn't have to skip
-  // over a half-edited chunk.
-  if (reverseAudio) {
-    modified = WrapSourceInSectionReverse(modified, sourceLength);
-  }
-
-  // --- Create empty item and apply chunk -----------------------------
-  MediaItem* newItem = api.addMediaItemToTrack(dstTrack);
-  if (!newItem) return nullptr;
-  if (!WriteItemChunk(newItem, modified)) {
-    // Best-effort: leave the empty item on the track if chunk apply
-    // failed. REAPER has no public RemoveMediaItem in the bare API.
-    return nullptr;
-  }
-  // The HoloRoll P_EXT marker is part of the cloned chunk, but we
-  // re-stamp it defensively in case the source wasn't a HoloRoll item
-  // (future use as a generic clone helper).
-  MarkAsHoloRollItem(newItem);
-  return newItem;
-}
+// v0.14.0-alpha.6: CloneItemAtPosition removed. Reverse-unit path now
+// uses CreateNamedItemWithRolls (which attaches silent.wav as source
+// on creation) followed by SetItemReverseViaChunk (which wraps the
+// SOURCE WAVE in SECTION/MODE 2). Chunk-clone was needed in alpha.5
+// only because export-placed source items had real-or-empty sources
+// we wanted to preserve; alpha.6's silent-baseline approach makes
+// that preservation moot — every item is silence either way.
 
 // v0.9.1: find the latest region end across the entire project. Used to
 // place new items right after existing content so we never overlap.
@@ -1817,6 +1884,12 @@ MediaItem* CreateNamedItemWithRolls(MediaTrack* track, double position,
     char buf[kItemNameBufferSize];
     std::snprintf(buf, sizeof(buf), "%s", name.c_str());
     api.getSetMediaItemTakeInfo_String(take, "P_NAME", buf, true);
+    // v0.14.0-alpha.6: attach silent audio source. Without a real
+    // PCM_source under the take, the SECTION/MODE 2 reverse wrapper
+    // is mechanically a no-op (nothing to play backwards). Every
+    // HoloRoll item now carries silence as its source so reverse-
+    // capable chunks work uniformly across forward and reverse paths.
+    AttachSilentSourceToTake(take);
   }
 
   MarkAsHoloRollItem(item);
@@ -2958,18 +3031,34 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
     // exact duration via CreateNamedItemWithRolls).
     const double il = api.getMediaItemInfo_Value(discoveredItem, "D_LENGTH");
 
+    // v0.14.0-alpha.6: re-stamp the export-placed source item with
+    // silent audio so it matches the baseline of items WE create.
+    // Q3=B decision: full consistency over backward compatibility.
+    // Replaces whatever the export pipeline put on the take (currently
+    // Empty Source) with silence.wav. Forward var 1 inherits this when
+    // we reposition the source below; reverse uses it as the template
+    // for SECTION/MODE 2 wrapping on its own fresh clones.
+    ReStampItemWithSilentSource(discoveredItem);
+
     auto formatSuffix = [](int v) {
       char buf[8];
       std::snprintf(buf, sizeof(buf), "_%02d", v);
       return std::string(buf);
     };
 
-    // v0.14.0-alpha.5: reverse-unit path takes precedence — it does
-    // not touch the source's position. The source stays wherever the
-    // forward unit (earlier in `units`) placed it; reverse-unit just
-    // uses the discovered item as a CHUNK TEMPLATE for cloning.
-    // Geometry rules (length, region pad, gap advance) are identical
-    // to the forward path so the two units lay out interchangeably.
+    // v0.14.0-alpha.5/.6: reverse-unit path. Does NOT touch the
+    // source's position — that's owned by the forward unit (earlier
+    // in `units`). Instead, we create N fresh items with silent
+    // audio via CreateNamedItemWithRolls (which attaches silence.wav
+    // on the new take), then wrap each one's take source in
+    // SECTION/MODE 2 via SetItemReverseViaChunk. Result: items
+    // REAPER recognises as section-reversed (Item Properties →
+    // Section/Reverse checkbox checked), with consistent silent
+    // audio backbone matching forward items.
+    //
+    // Geometry rules (item length, region padding, gap advance) are
+    // identical to the forward path so the two units lay out
+    // interchangeably in the `units` array.
     if (reverseUnit) {
       for (int v = 1; v <= variations; ++v) {
         const std::string suffix = formatSuffix(v);
@@ -2981,15 +3070,28 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
         const std::string itemName = (v == 1) ? anim : (anim + suffix);
         const std::string regionName = regionBase + suffix;
 
-        MediaItem* clone = CloneItemAtPosition(discoveredItem, discoveredTrack,
-                                               pos, itemName,
-                                               /*reverseAudio=*/true, il);
+        MediaItem* clone = CreateNamedItemWithRolls(discoveredTrack, pos, il,
+                                                     0.0f, 0.0f, itemName);
         if (!clone) {
           skipped.push_back({
               {"anim",   anim + suffix},
-              {"reason", "reverse clone failed"},
+              {"reason", "reverse item creation failed"},
           });
           continue;
+        }
+
+        // Wrap the silent source in SECTION/MODE 2 so REAPER plays it
+        // backwards. SetItemReverseViaChunk reads the just-created
+        // chunk (which now has <SOURCE WAVE FILE "...silence.wav">),
+        // wraps the WAVE block in <SOURCE SECTION ... MODE 2 ...>,
+        // and writes back. If the wrap fails for any reason we still
+        // report the item as created (the region is valid and the
+        // audio is silence regardless of direction) and log a warning.
+        if (!SetItemReverseViaChunk(clone, il)) {
+          skipped.push_back({
+              {"anim",   anim + suffix},
+              {"reason", "section/reverse chunk wrap failed (item still placed)"},
+          });
         }
 
         if (loc.fxIdx >= 0) {
@@ -3148,6 +3250,18 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
   EnsureConfigDefaults();
   ApplyRegionPrefixFromConfig();
   g_config.Save();
+
+  // v0.14.0-alpha.6: materialise silence.wav up front so the first
+  // build_regions call doesn't pay the ~5 MB-write cost mid-batch.
+  // The path is cached after this; subsequent SilenceWavPath() calls
+  // are O(1) and never touch disk. If creation fails (no APPDATA,
+  // permission issue), AttachSilentSourceToTake degrades silently —
+  // affected items end up with empty sources and reverse won't work
+  // on them, but the plugin still loads.
+  if (SilenceWavPath().empty()) {
+    ConsoleLog("[holoroll] WARNING: silence.wav generation failed; "
+               "SECTION-reverse will not work on this session.\n");
+  }
 
   // v0.9.0: initialise OLE so we can register drop targets on our viewport.
   // Returns true if OLE is usable; false here doesn't fail plugin load,

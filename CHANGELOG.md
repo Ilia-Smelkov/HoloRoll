@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0-alpha.6] — 2026-06-05
+
+Reverse via SECTION/MODE 2 actually works now: every HoloRoll item
+carries a silent audio source so the chunk wrapper has something to
+wrap. Backward compatibility with pre-alpha.6 empty-source items is
+intentionally dropped (`забиваем на backward compatibility`).
+
+### Added — silence.wav baseline
+
+- Plugin init generates a 5-minute silent WAV at:
+  ```
+  %APPDATA%\REAPER\UserPlugins\HoloRollAudio\silence.wav
+  ```
+  Format: 8 kHz, mono, 16-bit PCM. Total size ~4.8 MB. Generation is
+  idempotent — skipped if the file already exists with the expected
+  size. Subsequent `SilenceWavPath()` calls are O(1).
+- New REAPER API bindings:
+  - `PCM_Source_CreateFromFile(filename) → PCM_source*`
+  - `SetMediaItemTake_Source(take, source) → bool`
+- `AttachSilentSourceToTake(take)` helper: idempotently sets the
+  take's source to a fresh PCM_source built from silence.wav. REAPER
+  reference-counts PCM_sources, so the file on disk is never copied
+  per-item.
+- `ReStampItemWithSilentSource(item)` helper: re-stamps an existing
+  item's active take. Used by `build_regions` to bring the export-
+  placed source item up to the silent baseline.
+
+### Changed — uniform silent backbone
+
+- `CreateNamedItemWithRolls` now attaches silence.wav to the new
+  take. Forward variations 2..N (which previously had empty takes)
+  carry silent audio. Their waveform shows as a flat line in REAPER
+  but they're mechanically full items now.
+- `build_regions` re-stamps the discovered source item with silent
+  audio on first touch — BEFORE forward repositioning or reverse
+  cloning. Brings the export-placed Empty Source up to baseline so
+  forward variation 1 (the repositioned source) is consistent with
+  the other items.
+- Reverse-unit path now creates fresh items via
+  `CreateNamedItemWithRolls` (silent source attached automatically)
+  and wraps them via `SetItemReverseViaChunk`. The SECTION/MODE 2
+  block now has real audio underneath it — REAPER plays silence
+  backwards in real time, and Item Properties → Section/Reverse
+  checkbox correctly reflects the state.
+
+### Removed
+
+- `CloneItemAtPosition` (alpha.5) removed as dead code. It was
+  designed to preserve the source's audio via chunk-clone — moot
+  now that every item has silence as its source. ~80 lines gone.
+
+### Why this matters
+
+- Pre-alpha.6 (alpha.5 specifically): SECTION/MODE 2 wrapping was
+  semantically correct in the chunk but **did nothing** at playback
+  because the source item placed by the export pipeline had no audio.
+  Wrapping silence-of-nothing in SECTION/MODE 2 produces silence-of-
+  nothing-reversed (still nothing). The Reverse checkbox in Item
+  Properties wouldn't visibly toggle, and HoloRoll preview detection
+  via chunk substring search would never fire.
+- alpha.6 ensures REAPER always has actual PCM data to wrap. Silence
+  reversed is still silence, but the *mechanism* is now valid:
+  - Item Properties → Section + Reverse: correctly displayed as
+    checked on reverse items.
+  - Playback through REAPER's mixer: SECTION wrapper engages.
+  - `IsItemReversedViaChunk`: substring scan finds `<SOURCE SECTION`
+    + `MODE 2` and returns true.
+  - HoloRoll 3D preview: inverts frame computation for reverse items.
+
+### Caveats
+
+- Silence is fixed at 5 minutes. Items longer than that won't fully
+  populate their SECTION extent. No animation we'd plausibly handle
+  comes close to this limit.
+- Pre-alpha.6 projects with HoloRoll items have Empty Source takes;
+  alpha.6 doesn't migrate them on open. Re-run `build_regions` to
+  bring them up to the new baseline. We accepted this backward-
+  compat break per the alpha.6 design discussion.
+
+
 ## [0.14.0-alpha.5] — 2026-06-04
 
 `build_regions` units gain a `reverse` flag for native REAPER
@@ -2115,7 +2195,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.5...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.6...HEAD
+[0.14.0-alpha.6]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.6
 [0.14.0-alpha.5]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.5
 [0.14.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.4
 [0.14.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.3
