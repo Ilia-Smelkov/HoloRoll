@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0-alpha.7] — 2026-06-05
+
+Reverse-detection bitmask fix. alpha.5/.6 wrote the SECTION wrapper
+correctly (REAPER's GUI showed Section+Reverse checkboxes checked) but
+preview-side detection broke on re-read — animations always played
+forward and the viewport showed no reverse state.
+
+### Fixed
+- **`IsItemReversedViaChunk` now parses MODE as a bitmask.** REAPER
+  stores SECTION's MODE field as a flag bitmask:
+  - bit 0 (value 1): section bounds in use.
+  - bit 1 (value 2): reverse playback.
+  - higher bits: loop, fades, etc.
+  alpha.5/.6 detection literally searched for the substring `"MODE 2"`
+  on its own line. We always WROTE `MODE 2` (reverse-only), but REAPER
+  normalised that on serialisation to `MODE 3` (section + reverse,
+  because the Section checkbox was effectively engaged) — so the
+  literal "MODE 2" substring never appeared on re-read, isReverse
+  stayed false, and `ResolvePlayheadFromItems` never inverted the
+  frame. alpha.7 parses the integer after `MODE ` within the SECTION
+  block and tests `value & 2`. Matches any MODE value with the
+  reverse bit set (2, 3, 6, 7, ...).
+
+### Why it manifested this way
+The asymmetry is the giveaway: WRITING `MODE 2` worked (REAPER read
+our value, showed Reverse checked in Item Properties), but READING
+back via `GetSetMediaItemInfo_String("P_CHUNK", ...)` returned
+REAPER's normalised form. REAPER's chunk serialiser is lossy in this
+direction — it stores effective state, not literal previous input.
+
+
 ## [0.14.0-alpha.6] — 2026-06-05
 
 Reverse via SECTION/MODE 2 actually works now: every HoloRoll item
@@ -2195,7 +2226,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.6...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.14.0-alpha.7...HEAD
+[0.14.0-alpha.7]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.7
 [0.14.0-alpha.6]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.6
 [0.14.0-alpha.5]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.5
 [0.14.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.14.0-alpha.4

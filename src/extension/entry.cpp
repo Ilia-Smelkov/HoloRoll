@@ -1265,20 +1265,57 @@ bool WriteItemChunk(MediaItem* item, const std::string& chunk) {
   return api.getSetMediaItemInfo_String(item, "P_CHUNK", buf.data(), true);
 }
 
-// True if the item's chunk contains a SECTION block with MODE 2 — i.e.
-// REAPER is configured to play this item's source backwards. Cheap
-// substring check; standard REAPER chunks only emit MODE 2 inside
-// SECTION blocks, so false positives are not a practical concern.
+// True if the item's chunk represents REAPER's section/reverse state.
+//
+// v0.14.0-alpha.7 fix: MODE inside a SOURCE SECTION block is a BITMASK,
+// not a discrete value. The bits we care about:
+//   bit 0 (val 1): "use section bounds" — set when user enabled the
+//                  Section checkbox (or LENGTH/STARTPOS were customised).
+//   bit 1 (val 2): reverse direction.
+//   higher bits:   loop, fade modes, etc. — irrelevant for our check.
+//
+// alpha.5/.6 wrote `MODE 2` (reverse-only). REAPER accepted that and
+// displayed both Section + Reverse checkboxes checked in Item Properties
+// — but on serialisation back it normalised to `MODE 3` (bit 0 | bit 1)
+// because the Section checkbox was effectively engaged. The alpha.5/.6
+// substring check for literal "MODE 2" therefore never matched on
+// re-read, so isReverse stayed false and preview played forwards.
+//
+// alpha.7 parses the integer after `MODE ` within the SECTION block and
+// tests `value & 2`. Robust to any MODE value with the reverse bit set:
+// 2, 3, 6, 7, etc.
 bool IsItemReversedViaChunk(MediaItem* item) {
   const std::string chunk = ReadItemChunk(item);
   if (chunk.empty()) return false;
-  if (chunk.find("<SOURCE SECTION") == std::string::npos) return false;
-  // MODE line inside SECTION; we look for "MODE 2" on its own line.
-  // Match common indentations.
-  return chunk.find("\nMODE 2\n") != std::string::npos ||
-         chunk.find("\n  MODE 2\n") != std::string::npos ||
-         chunk.find("\n    MODE 2\n") != std::string::npos ||
-         chunk.find("\n\tMODE 2\n") != std::string::npos;
+
+  const std::size_t sectionPos = chunk.find("<SOURCE SECTION");
+  if (sectionPos == std::string::npos) return false;
+
+  // Cheap upper bound on how far past the opener we'll search for the
+  // MODE line. HoloRoll SECTION blocks are <300 bytes; 4 KB allows for
+  // exotic chunks (long FILE paths, extra metadata) without scanning
+  // the entire chunk.
+  const std::size_t searchEnd = std::min(chunk.size(), sectionPos + 4096);
+
+  std::size_t pos = sectionPos;
+  while (pos < searchEnd) {
+    const std::size_t modePos = chunk.find("MODE ", pos);
+    if (modePos == std::string::npos || modePos >= searchEnd) return false;
+
+    std::size_t i = modePos + 5;
+    int value = 0;
+    bool hasDigit = false;
+    while (i < chunk.size()) {
+      const unsigned char c = static_cast<unsigned char>(chunk[i]);
+      if (c < '0' || c > '9') break;
+      value = value * 10 + (c - '0');
+      hasDigit = true;
+      ++i;
+    }
+    if (hasDigit && (value & 2) != 0) return true;
+    pos = modePos + 1;
+  }
+  return false;
 }
 
 // Wrap the first non-SECTION <SOURCE TYPE ...> block in the chunk with
