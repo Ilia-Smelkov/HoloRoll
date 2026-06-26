@@ -25,6 +25,10 @@ using HasExtStateFn = bool (*)(const char* section, const char* key);
 using DockWindowAddExFn = void (*)(HWND hwnd, const char* name, const char* identstr, bool allowShow);
 using DockWindowRemoveFn = void (*)(HWND hwnd);
 using DockWindowActivateFn = void (*)(HWND hwnd);
+// v0.16.0-alpha.9: tells REAPER's toolbar to re-poll toggle action state.
+// Used after a docked window self-destroys (tab X click) so the toolbar
+// button un-lights. See `toggleaction` hook + SWS' WM_DESTROY pattern.
+using RefreshToolbarFn = void (*)(int command_id);
 
 // Read the toggle-state of an action. Returns 1 if the toggle is ON,
 // 0 if OFF, -1 if the action doesn't have a toggle state. Used in
@@ -241,6 +245,7 @@ struct ReaperApi {
   DockWindowAddExFn dockWindowAddEx = nullptr;
   DockWindowRemoveFn dockWindowRemove = nullptr;
   DockWindowActivateFn dockWindowActivate = nullptr;
+  RefreshToolbarFn   refreshToolbar = nullptr;
   GetToggleCommandStateFn getToggleCommandState = nullptr;
 
   // Track / item / take (spike for v0.6.0 items model).

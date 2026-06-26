@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <windows.h>
 #include <vector>
@@ -142,12 +143,27 @@ class GlViewport {
     // detector on the item's top-1 active bone, and writes REAPER
     // project markers at the detected event times.
     bool generateMotionMarkers = false;
+
+    // v0.16.0-alpha.7: user pressed the in-overlay Close button. When
+    // the viewport is docked, the default window-frame close path is
+    // hidden under REAPER's dock chrome (no titlebar X), so we surface
+    // an explicit Close button in the Config section.
+    bool closeViewport = false;
   };
 
   bool Open();
   void Close();
   bool IsOpen() const { return hwnd_ != nullptr; }
   HWND Hwnd() const { return hwnd_; }
+
+  // v0.16.0-alpha.9: invoked from WndProc's WM_DESTROY BEFORE hwnd_ is
+  // cleared. Receives the live HWND so REAPER's DockWindowRemove can
+  // run synchronously while it's still valid (the docker chrome's tab
+  // X click flows here — see SWS' sws_wnd.cpp). entry.cpp registers a
+  // callback that calls DockWindowRemove + drop-target unregister +
+  // RefreshToolbar. Must NOT call back into GlViewport.
+  using OnDestroyCallback = std::function<void(HWND)>;
+  void SetOnDestroyCallback(OnDestroyCallback cb) { onDestroy_ = std::move(cb); }
 
   void Tick();
 
@@ -190,6 +206,14 @@ class GlViewport {
   void SetDebugEnabled(bool enabled);
   bool GetDebugEnabled() const;
   bool ConsumeDebugDirty();
+
+  // ---- v0.16.0-alpha.7 open-on-startup toggle ---------------------------
+  // Mirror of the global config key `viewport.open_on_startup`. The
+  // checkbox is in the overlay's Config section; entry.cpp persists
+  // dirty changes to holoroll_config.ini.
+  void SetOpenOnStartup(bool enabled);
+  bool GetOpenOnStartup() const;
+  bool ConsumeOpenOnStartupDirty();
 
   // ---- v0.16.0-alpha.1 camera attach state ------------------------------
   //
@@ -260,6 +284,9 @@ class GlViewport {
   OverlayRequests pendingRequests_{};
   bool imguiInitialized_ = false;
 
+  // v0.16.0-alpha.9: see SetOnDestroyCallback above.
+  OnDestroyCallback onDestroy_;
+
   RenderMode renderMode_ = RenderMode::Solid;
   float pointSize_ = 2.0f;
   float amplitudeScale_ = 1.0f;
@@ -315,6 +342,10 @@ class GlViewport {
   // overlay checkbox; OnTimer in entry.cpp consumes it.
   bool debugEnabled_ = false;
   bool debugDirty_ = false;
+
+  // v0.16.0-alpha.7: mirror of viewport.open_on_startup config key.
+  bool openOnStartup_ = true;
+  bool openOnStartupDirty_ = false;
 
   // v0.16.0-alpha.1/.2 camera attach state. cameraConfig_ is the
   // authoritative config; cameraDirty_ fires on user edit (UI panel or

@@ -19,6 +19,7 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.dockWindowAddEx = reinterpret_cast<DockWindowAddExFn>(rec->GetFunc("DockWindowAddEx"));
   api.dockWindowRemove = reinterpret_cast<DockWindowRemoveFn>(rec->GetFunc("DockWindowRemove"));
   api.dockWindowActivate = reinterpret_cast<DockWindowActivateFn>(rec->GetFunc("DockWindowActivate"));
+  api.refreshToolbar = reinterpret_cast<RefreshToolbarFn>(rec->GetFunc("RefreshToolbar"));
 
   // v0.12.0-alpha.1: GetToggleCommandState lets us check console-window
   // visibility before issuing the toggle action 40078.

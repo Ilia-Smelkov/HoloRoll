@@ -208,8 +208,40 @@ LRESULT CALLBACK GlViewport::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_CLOSE:
       DestroyWindow(hwnd);
       return 0;
+
+    // v0.16.0-alpha.10: REAPER's docker chrome posts WM_COMMAND with
+    // wParam == IDCANCEL when the user clicks the X on a docked tab.
+    // This is the standard Win32 modeless-dialog close protocol —
+    // CreateDialog-family windows route it through DefDlgProc which
+    // calls the dialog's handler; raw CreateWindowEx windows (us)
+    // hand the message to DefWindowProc which silently discards it
+    // because non-dialog windows have no IDCANCEL semantics.
+    //
+    // Switching the whole window to a dialog template (SWS' canonical
+    // pattern, cf. sws_wnd.cpp's CreateDialogParam) is the proper fix,
+    // but it requires substantial refactoring (dialog template, message
+    // signature change, GWLP_USERDATA threading). The minimal-surface
+    // retrofit is to handle WM_COMMAND IDCANCEL here in our WndProc —
+    // DestroyWindow then fires WM_DESTROY, which routes to onDestroy_
+    // and does DockWindowRemove + RefreshToolbar via entry.cpp's
+    // callback. Single code path with the rest of close (toggle action,
+    // overlay Close button, manual close).
+    case WM_COMMAND:
+      if (LOWORD(wParam) == IDCANCEL) {
+        DestroyWindow(hwnd);
+        return 0;
+      }
+      break;
+
     case WM_DESTROY:
       if (self) {
+        // v0.16.0-alpha.9: invoke entry.cpp's cleanup callback SYNCHRONOUSLY
+        // while hwnd is still valid (matches SWS' WM_DESTROY pattern in
+        // sws_wnd.cpp). The callback does DockWindowRemove(hwnd) +
+        // drop-target unregister + RefreshToolbar(0). Without this, the
+        // docker's tab X click left REAPER's internal dock state stale,
+        // breaking the next Toggle action's re-add.
+        if (self->onDestroy_) self->onDestroy_(hwnd);
         self->DestroyContext();
         self->hwnd_ = nullptr;
       }
@@ -1052,6 +1084,12 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     // RigidMechanismDetector — tuned for doors / levers / drawers /
     // switches; future detectors (footstep, impact) plug into the same
     // registry and pick will become a dropdown.
+    // v0.16.0-alpha.7: motion-marker button hidden in UI while the
+    // automation pipeline stabilises (the rigid-mechanism detector
+    // produces too many false-positive markers on some animations).
+    // Code path stays intact in entry.cpp's GenerateAllMotionMarkers
+    // — when re-enabled, just uncomment this block.
+#if 0
     if (ImGui::Button("Generate motion markers")) {
       pendingRequests_.generateMotionMarkers = true;
     }
@@ -1066,6 +1104,7 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
           "time range and rewrites them. Tuned for rigid mechanical\n"
           "animations; future detectors will handle footsteps etc.");
     }
+#endif
 
     // v0.11.0 / alpha.10: placement options. Inline next to "Place all".
     // alpha.10 removed Variations (one item per animation) and Region
@@ -1138,6 +1177,33 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
           "console. Off by default — the console stays clean unless\n"
           "you turn this on. Persisted in holoroll_config.ini.");
     }
+
+    // v0.16.0-alpha.7: open-on-startup toggle. Default ON. Lets users
+    // who don't want HoloRoll appearing automatically on REAPER launch
+    // opt out without unregistering the plugin.
+    if (ImGui::Checkbox("Open on REAPER startup", &openOnStartup_)) {
+      openOnStartupDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "When ON, HoloRoll opens its viewport automatically each time\n"
+          "REAPER loads the plugin. When OFF, open it manually via the\n"
+          "toolbar action or your assigned shortcut.");
+    }
+
+    // v0.16.0-alpha.7: explicit Close button. When the viewport is
+    // docked into REAPER's chrome, the standard window-close path
+    // (titlebar X) isn't reachable — this is the way to close it.
+    ImGui::Separator();
+    if (ImGui::Button("Close HoloRoll window")) {
+      pendingRequests_.closeViewport = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Close the HoloRoll viewport. Useful when docked — REAPER's\n"
+          "dock chrome hides the titlebar X. Re-open via the toolbar\n"
+          "action or your assigned shortcut.");
+    }
   }
 
   if (ImGui::CollapsingHeader("Playback", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1150,14 +1216,13 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
   }
 
   if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
-    // v0.16.0-alpha.2: simplified Free / Attached split.
-    //
-    // Free:     existing Fly camera (RMB + WASD + wheel).
-    // Attached: identical controls, but camera POSITION is locked to
-    //           the chosen bone's world transform + offset. WASD
-    //           edits the offset (camera-local axes) so you can fly
-    //           around the bone to tune the spring-arm placement;
-    //           RMB rotates view freely; wheel adjusts fly speed.
+    // v0.16.0-alpha.7: Mode toggle + Show-skeleton + Attached-mode UI
+    // hidden while bone-attach + skeleton viz stabilise across rig
+    // styles (control-rig pivots can land off-mesh in canonical glTF
+    // — see docs/EXPORTER_FIX_SPEC.md). For now the camera is Free
+    // only; the entire block stays compiled (#if 0) so re-enabling
+    // is a one-line revert.
+#if 0
     int modeIdx = static_cast<int>(cameraConfig_.mode);
     const char* modeLabels[] = {"Free", "Attached"};
     if (ImGui::Combo("Mode##cam", &modeIdx, modeLabels, IM_ARRAYSIZE(modeLabels))) {
@@ -1165,9 +1230,6 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
       cameraDirty_ = true;
     }
 
-    // Global "Show skeleton" toggle — debug aid for picking the right
-    // bone. Renders joint dots + bone-to-parent lines + (in Attached)
-    // a dashed spring-arm line from camera to attach anchor.
     bool showSkel = showSkeleton_;
     if (ImGui::Checkbox("Show skeleton", &showSkel)) {
       showSkeleton_ = showSkel;
@@ -1176,6 +1238,13 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
     if (showSkeleton_) {
       ImGui::TextDisabled("  Hover a joint dot to see its name");
     }
+#endif
+    // Force Free mode while the Attached/Skeleton UI is hidden so
+    // existing per-anim configs with mode=Attached don't leak through.
+    if (cameraConfig_.mode != CameraConfig::Mode::Free) {
+      cameraConfig_.mode = CameraConfig::Mode::Free;
+      cameraDirty_ = true;
+    }
 
     if (cameraConfig_.mode == CameraConfig::Mode::Free) {
       ImGui::TextDisabled("Hold RMB + WASD/QE to fly. Wheel = speed.");
@@ -1183,7 +1252,9 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
       if (ImGui::Button("Reset camera")) {
         ResetCameraToDefault(status);
       }
-    } else {
+    }
+#if 0
+    else {
       // Attached mode — bone picker + offset + damping.
       if (status.jointNames && !status.jointNames->empty()) {
         std::vector<const char*> nameCStrs;
@@ -1245,6 +1316,7 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
         cameraDirty_ = true;
       }
     }
+#endif  // Camera Attached-mode UI hidden in alpha.7.
   }
 
   if (ImGui::CollapsingHeader("Object", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2000,6 +2072,16 @@ bool GlViewport::GetDebugEnabled() const {
 bool GlViewport::ConsumeDebugDirty() {
   const bool was = debugDirty_;
   debugDirty_ = false;
+  return was;
+}
+
+void GlViewport::SetOpenOnStartup(bool enabled) {
+  openOnStartup_ = enabled;
+}
+bool GlViewport::GetOpenOnStartup() const { return openOnStartup_; }
+bool GlViewport::ConsumeOpenOnStartupDirty() {
+  const bool was = openOnStartupDirty_;
+  openOnStartupDirty_ = false;
   return was;
 }
 

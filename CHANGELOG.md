@@ -7,6 +7,248 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deferred / future work
+- **Full Blender-style skinning replication** (`move_skinned_meshes` +
+  `skin_into_bind_pose` + separate VNode bone hierarchy). Would let
+  HoloRoll match Blender's bone-on-mesh visualisation for non-standard
+  control-rig exports (see `docs/EXPORTER_FIX_SPEC.md`). Scoped as a
+  multi-week refactor of `glb_loader.cpp`'s bake loop; not on the
+  short-term roadmap. For now, exporter-side fix is the right
+  trade-off — keeps `glb_loader.cpp` aligned with canonical glTF spec
+  and shifts the rig-shape contract to where it belongs (the file).
+
+## [0.16.0-alpha.10] — 2026-06-07
+
+Dock tab X close — the actual fix, finally. Forum-research win.
+
+### Fixed
+- **REAPER's docker tab-X click now actually closes HoloRoll.**
+  Background: REAPER's docker chrome uses the standard Win32
+  modeless-dialog close protocol — on tab X it posts `WM_COMMAND` with
+  `LOWORD(wParam) == IDCANCEL` to the tabbed HWND. Dialog windows
+  (created via `CreateDialogParam`) route this through `DefDlgProc`
+  which calls the registered dialog handler, naturally closing the
+  window. Our viewport is a raw `CreateWindowEx` window — its WndProc
+  handed `WM_COMMAND IDCANCEL` to `DefWindowProc`, which silently
+  discards IDCANCEL because non-dialog windows have no IDCANCEL
+  semantics.
+- alpha.9's research was incomplete: `WM_DESTROY` only fires when
+  REAPER tears the WHOLE docker down (or for the in-overlay Close
+  button which calls `DestroyWindow` directly). For per-tab close,
+  the docker waits for the tab to destroy itself in response to
+  `WM_COMMAND IDCANCEL`.
+- alpha.10 adds a one-case `WM_COMMAND` branch in our WndProc:
+  ```cpp
+  case WM_COMMAND:
+    if (LOWORD(wParam) == IDCANCEL) {
+      DestroyWindow(hwnd);   // → WM_DESTROY → onDestroy_ callback
+      return 0;
+    }
+    break;
+  ```
+  `DestroyWindow` fires `WM_DESTROY` which routes through alpha.9's
+  `onDestroy_` callback (DockWindowRemove + drop-target unregister +
+  RefreshToolbar). Single code path with the other close routes.
+
+### Reference
+- Verbatim quote from Justin Frankel at the top of SWS' `sws_wnd.cpp`:
+  > "It's often the easiest to build your application out of plain
+  > dialog (DialogBoxParam() or CreateDialogParam())…"
+- SWS' canonical implementation uses `CreateDialogParam` + a dialog
+  template; `WM_COMMAND IDCANCEL` is their explicit close contract
+  (cf. sws_wnd.cpp lines 318–328, and their own `Show(toggle)` path
+  literally sends `SendMessage(m_hwnd, WM_COMMAND, IDCANCEL, 0)` to
+  close the window).
+- The fully canonical fix would be migrating `gl_viewport.cpp` to a
+  dialog template + `CreateDialogParam` + dialog-proc signature; the
+  one-case retrofit covers the close path with minimal surface
+  change.
+
+
+## [0.16.0-alpha.9] — 2026-06-07
+
+Dock tab X close — done properly this time, by following the SWS
+extension's canonical pattern.
+
+### Fixed
+- **alpha.8's `IsWindowVisible` polling was wrong** — it also fired on
+  in-docker tab-switching (e.g. user clicks the Video tab next to
+  HoloRoll → HoloRoll is briefly invisible → after 150 ms we auto-
+  closed it, which obviously isn't what the user wanted).
+- **Actual mechanism**: REAPER's docker chrome calls `DestroyWindow()`
+  on the tab X click. `WM_DESTROY` fires in our WndProc. The SWS
+  reference implementation (`sws_wnd.cpp`) does three things in that
+  handler, IN ORDER, while the hwnd is still valid:
+  1. `DockWindowRemove(hwnd)` — frees REAPER's dock-state entry.
+  2. Drop-target / context cleanup.
+  3. `RefreshToolbar(0)` — forces REAPER to re-poll the toggle action,
+     un-lighting the toolbar button.
+  Without #1 the dock's internal table holds a dangling slot for our
+  identifier, so the next `DockWindowAddEx` with the same identifier
+  silently fails or no-ops — manifesting as "first Toggle after close
+  doesn't open it."
+
+### Implementation
+- New `RefreshToolbar` REAPER API binding (`reaper_api.h` /
+  `reaper_bridge.cpp`).
+- `GlViewport::SetOnDestroyCallback(OnDestroyCallback)` — function
+  pointer hook invoked from WndProc's `WM_DESTROY` with the live HWND,
+  before `hwnd_` is cleared. Keeps the render layer agnostic of REAPER
+  API; the callback lives in entry.cpp.
+- Callback registered once in `REAPER_PLUGIN_ENTRYPOINT`:
+  ```cpp
+  g_viewport.SetOnDestroyCallback([](HWND h) {
+    drop_target::UnregisterFromHwnd(h);
+    if (api.dockWindowRemove) api.dockWindowRemove(h);
+    if (api.refreshToolbar)   api.refreshToolbar(0);
+  });
+  ```
+- `CloseViewportIfNeeded()` simplified — no longer calls
+  `DockWindowRemove` / drop-target unregister directly; just calls
+  `Close()` which triggers `DestroyWindow()` → `WM_DESTROY` → the
+  callback. Same cleanup path whether the user closed via the docker
+  tab X, the overlay Close button, or the Toggle action.
+
+### Reference
+- [reaper-oss/sws — sws_wnd.cpp `SWS_DockWnd::WM_DESTROY`](https://github.com/reaper-oss/sws/blob/master/sws_wnd.cpp).
+
+
+## [0.16.0-alpha.8] — 2026-06-07
+
+Dock-tab X close finally works correctly.
+
+### Fixed
+- **Tab-X click in REAPER's docker now actually closes HoloRoll.**
+  Background: REAPER's dock chrome doesn't send WM_CLOSE / WM_DESTROY
+  when the user clicks the X on the HoloRoll tab — it just calls
+  `ShowWindow(SW_HIDE)` to make the window invisible. The hwnd stays
+  alive, so `g_viewport.IsOpen()` reported `true` indefinitely. The
+  Toggle action then saw "still open" and called CloseViewportIfNeeded
+  on the already-invisible window, costing the user one extra click
+  before they could re-open.
+- alpha.8 polls `IsWindowVisible(viewport_hwnd)` in OnTimer. If the
+  hwnd exists but is invisible for ~150 ms (5 ticks) in a row, runs
+  the full close cleanup path (DockWindowRemove + DestroyContext +
+  hwnd_ reset). Subsequent Toggle calls open the viewport fresh.
+- This also fixes Issue #2 from the alpha.7 report: "first Toggle
+  after closing the docker doesn't open it." Same root cause —
+  IsOpen lying — same fix.
+
+
+## [0.16.0-alpha.7] — 2026-06-07
+
+UX trio.
+
+### Added
+- **Open on REAPER startup** (default ON). New config key
+  `viewport.open_on_startup`. The plugin entrypoint opens the viewport
+  automatically when REAPER loads it; toggle off via the Config-
+  section checkbox to start REAPER without HoloRoll visible.
+- **Explicit "Close HoloRoll window" button** in the Config section.
+  Needed because docking the viewport into REAPER's chrome hides the
+  standard titlebar X — there was no way to dismiss it short of
+  un-docking first. Now Config → Close HoloRoll window dismisses
+  either docked or floating state.
+
+### Hidden (kept compiled, `#if 0` blocks)
+- **"Generate motion markers" button** — automation pipeline produces
+  too many false positives on some animations. Code in
+  `entry.cpp::GenerateAllMotionMarkers` is untouched; re-enable by
+  flipping the `#if 0` in `gl_viewport.cpp`.
+- **Camera Mode toggle (Attached) + "Show skeleton" checkbox + the
+  whole Attached-mode UI block.** Bone-attach feature works correctly
+  for standard-rig glTFs (Cesium Man et al), but for control-rig
+  exports it puts the camera at rig pivots, not on the mesh body —
+  see `docs/EXPORTER_FIX_SPEC.md`. The camera is now Free-only in
+  the UI; existing per-anim configs with `mode=attached` get force-
+  reset to Free on load.
+
+### Rationale
+Cleaning the UI surface to "works for everyone" features before
+pushing 0.16 toward a stable. Both hidden surfaces stay compiled so a
+focused re-enable is a one-line revert when their underlying
+mechanisms stabilise.
+
+
+## [0.16.0-alpha.6] — 2026-06-06
+
+Revert alpha.5. The "apply `inv(meshNodeWorld)` to both skinning and
+joint matrices" hypothesis broke Cesium Man (model rotated 90° AND
+rig drifted off-mesh — meaning Cesium Man also has non-identity
+`meshNodeWorld`, but its IBM convention differs from test.glb's) and
+didn't fix the original test.glb misalignment either. Restoring the
+alpha.4 skinning formula until we have a more precise model of how
+each file encodes the mesh↔joint relationship.
+
+### Reverted
+- alpha.5's `effectiveJointWorld = meshNodeWorldInv * nodeWorld[n]`
+  pre-multiplication is removed. Skinning is back to
+  `jointSkin[j] = nodeWorld[n] * IBM[j]` and
+  `jointWorldMatrices_[j][f] = nodeWorld[n]`.
+
+### Why it failed
+- Blender's `move_skinned_meshes` works because the importer ALSO
+  re-bakes vertices via `skin_into_bind_pose` AND chains bone TRS
+  through a separate VNode hierarchy. We replicated only the
+  pre-multiply step, not the rebake + hierarchy chaining. For models
+  whose IBMs encode the mesh node transform asymmetrically (Cesium
+  Man's IBM is pure inverse of bind world; test.glb's IBM has mesh
+  node world baked in), a single pre-multiply applies the wrong
+  correction in one of the two cases.
+- The correct fix needs per-file inspection of IBM convention before
+  any compensation can be applied — running `scripts/diagnose_glb.py`
+  on each file to inspect bind-pose math.
+
+### Path forward
+- Will diagnose Cesium Man's IBM structure next (same script, same
+  output, against the canonical sample model) to determine the
+  invariant we're missing.
+
+
+## [0.16.0-alpha.5] — 2026-06-06
+
+Skeleton/mesh alignment for skinned meshes with non-identity mesh-node
+parent transforms (typical Blender export with `-90°X` axis conversion).
+Matches Blender's own glTF importer behaviour.
+
+### Fixed
+- **Skinned vertices and joint matrices now share a common frame.**
+  Previously: skinning computed `joint_world * IBM * vertex`, which —
+  when the mesh node's parent chain has a non-identity transform AND
+  IBMs have that transform baked in (standard Blender export
+  convention) — landed vertices at `mesh_node_world * vertex_local`
+  while joints were drawn at their raw `node.globalTransform`. The two
+  ended up in different coordinate frames, so the magenta bbox-centre
+  cross would sit on the mesh body while the yellow joint dots floated
+  off to the side, even though skinning itself was mathematically
+  correct per glTF 2.0 spec.
+- alpha.5 mirrors Blender's `move_skinned_meshes` approach: pre-
+  multiply both the skinning matrix AND the per-joint world matrix
+  by `inv(meshNodeWorld)`. The effective result is that the entire
+  scene — vertices, joints, camera framing — operates in "armature-
+  local" space. For `meshNodeWorld == Identity` (Cesium Man and most
+  humanoid rigs) this is a no-op; for `-90°X` axis-conversion exports
+  bones now sit on the mesh.
+
+### Implementation
+- `glb_loader.cpp`: added a rigid-inverse helper (`R^T | -R^T * t`)
+  assuming the mesh node transform is rotation + translation without
+  scale (true for all Blender axis-conversion exports). Computed
+  `meshNodeWorldInv` once before the bake loop.
+- In the per-frame loop, replaced `jointSkin[j] = nodeWorld[n] *
+  ibms[j]` with `jointSkin[j] = (meshNodeWorldInv * nodeWorld[n]) *
+  ibms[j]`. Stored the same effective joint matrix in
+  `jointWorldMatrices_[j][f]` for camera-attach + skeleton viz.
+
+### Verified against
+- glTF-Blender-IO `move_skinned_meshes` (vnode.py), `pick_bind_pose`,
+  `calc_bone_matrices`, `skin_into_bind_pose` (mesh.py). The Blender
+  importer reparents skinned mesh to the armature and discards the
+  mesh node's hierarchy transform; placing bones at `inv(IBM)` in
+  armature-local space gives identical mesh+bone alignment to what
+  we now produce.
+
+
 ## [0.16.0-alpha.4] — 2026-06-06
 
 Reset-button polish + rotation-order bug squashed + skeleton-offset
@@ -2677,7 +2919,13 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.4...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.10...HEAD
+[0.16.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.10
+[0.16.0-alpha.9]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.9
+[0.16.0-alpha.8]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.8
+[0.16.0-alpha.7]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.7
+[0.16.0-alpha.6]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.6
+[0.16.0-alpha.5]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.5
 [0.16.0-alpha.4]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.4
 [0.16.0-alpha.3]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.3
 [0.16.0-alpha.2]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.2

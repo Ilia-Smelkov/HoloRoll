@@ -862,15 +862,13 @@ bool GlbLoader::LoadFromFileAtIndex(const std::string& path,
       n = parents[n];
     }
   }
-  // Inverse of meshNodeWorld is needed in the skinning equation
-  // (vertex = meshNodeWorld_inv * Σ jointWorld * IBM * vertex_local).
-  // For simplicity we assume meshNodeWorld is rigid (rotation + uniform
-  // scale + translation), which is the common Blender export case.
-  // We'll fold it in below.
-  // For most Blender skinned exports, meshNodeWorld is identity, in which
-  // case the inverse is trivially identity. We compute the inverse only
-  // when necessary. For now, take the simpler path: assume identity.
-  // (If artists report wrong scale/orientation, revisit.)
+  // v0.16.0-alpha.6: REVERTED alpha.5's pre-multiplication of
+  // inv(meshNodeWorld) — broke Cesium Man (rotated 90° + rig offset)
+  // and didn't fix test.glb. The "apply inv(meshNodeWorld) to
+  // everything" hypothesis was too coarse; different files encode the
+  // mesh<->joint relationship differently (some bake mNW into IBM,
+  // some don't, some have hybrid setups). Need per-file inspection
+  // before re-attempting. Restoring alpha.4 behaviour.
 
   for (std::uint32_t f = 0; f < totalFrames_; ++f) {
     const float t = static_cast<float>(f) / static_cast<float>(fps);

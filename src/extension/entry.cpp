@@ -103,6 +103,11 @@ constexpr char kCfgKeySceneGridStep[]   = "scene.grid_step";
 // v0.16.0-alpha.2: skeleton-viz toggle. Global (not per-anim) — debug
 // aid that the user toggles ad-hoc.
 constexpr char kCfgKeyShowSkeleton[]    = "viewport.show_skeleton";
+// v0.16.0-alpha.7: open the HoloRoll viewport automatically when REAPER
+// loads the plugin. Default ON. The Config checkbox lets the user
+// opt out — e.g. when they want REAPER to start clean and only
+// open HoloRoll via the toolbar action.
+constexpr char kCfgKeyOpenOnStartup[]   = "viewport.open_on_startup";
 // v0.10.0 scale-awareness toggles. All default off-by-default for clean
 // install except bbox dimensions and grid labels which are visually subtle
 // enough that turning them on by default helps new users orient.
@@ -248,6 +253,7 @@ void EnsureConfigDefaults() {
   if (!g_config.Has(kCfgKeyRegionPrefix)) g_config.SetString(kCfgKeyRegionPrefix, "");
   if (!g_config.Has(kCfgKeyHotReload)) g_config.SetDouble(kCfgKeyHotReload, 1.0);
   if (!g_config.Has(kCfgKeyShowSkeleton))    g_config.SetDouble(kCfgKeyShowSkeleton, 0.0);
+  if (!g_config.Has(kCfgKeyOpenOnStartup))   g_config.SetDouble(kCfgKeyOpenOnStartup, 1.0);
   if (!g_config.Has(kCfgKeySceneShowGround)) g_config.SetDouble(kCfgKeySceneShowGround, 1.0);
   if (!g_config.Has(kCfgKeySceneRadius))     g_config.SetDouble(kCfgKeySceneRadius, 20.0);
   if (!g_config.Has(kCfgKeySceneGridStep))   g_config.SetDouble(kCfgKeySceneGridStep, 1.0);
@@ -376,6 +382,9 @@ void ApplySceneSettingsToViewport() {
   g_viewport.SetSceneSettings(show, radius, gridStep, bbox, labels, refHuman);
   // v0.16.0-alpha.2: also re-apply the global skeleton-viz toggle.
   g_viewport.SetSkeletonVisible(g_config.GetDouble(kCfgKeyShowSkeleton, 0.0) >= 0.5);
+  // v0.16.0-alpha.7: mirror open-on-startup toggle into the viewport so
+  // the Config-section checkbox reflects the current config value.
+  g_viewport.SetOpenOnStartup(g_config.GetDouble(kCfgKeyOpenOnStartup, 1.0) >= 0.5);
 }
 
 // Pull current scene state from viewport and write it into the config + disk.
@@ -982,9 +991,14 @@ void OpenViewportIfNeeded() {
 
 void CloseViewportIfNeeded() {
   if (g_viewport.IsOpen()) {
-    drop_target::UnregisterFromHwnd(g_viewport.Hwnd());
-    const auto& api = g_bridge.Api();
-    if (api.dockWindowRemove) api.dockWindowRemove(g_viewport.Hwnd());
+    // v0.16.0-alpha.9: dock cleanup + drop-target unregister are now
+    // handled by GlViewport's WM_DESTROY callback (registered in
+    // REAPER_PLUGIN_ENTRYPOINT). DestroyWindow() inside Close() fires
+    // WM_DESTROY synchronously, which calls back into our lambda
+    // BEFORE hwnd_ is cleared. So this function only needs to trigger
+    // the destroy — same cleanup whether the user closed via tab X
+    // (REAPER → DestroyWindow), the in-overlay Close button, or the
+    // Toggle action.
     g_viewport.Close();
   }
 }
@@ -2887,6 +2901,14 @@ void OnTimer() {
   // for future periodic re-check / progress UI.
   updater::Tick();
 
+  // v0.16.0-alpha.8 polling fix REVERTED in alpha.9: IsWindowVisible-
+  // based detection also fired on tab-switching inside the docker (e.g.
+  // user clicked the Video tab → HoloRoll hidden → after 150 ms we
+  // auto-closed, which is wrong). The actual mechanism is WM_DESTROY,
+  // dispatched by REAPER when the user clicks tab X — handled now via
+  // the GlViewport::SetOnDestroyCallback below (registered once in
+  // REAPER_PLUGIN_ENTRYPOINT). See gl_viewport.cpp WM_DESTROY handler.
+
   if (!g_viewport.IsOpen()) return;
 
   // v0.7.0: detect REAPER project changes (open / save-as / switch / close).
@@ -3048,6 +3070,12 @@ void OnTimer() {
                          g_viewport.GetSkeletonVisible() ? 1.0 : 0.0);
       g_config.Save();
     }
+    // v0.16.0-alpha.7: open-on-startup toggle persistence.
+    if (g_viewport.ConsumeOpenOnStartupDirty()) {
+      g_config.SetDouble(kCfgKeyOpenOnStartup,
+                         g_viewport.GetOpenOnStartup() ? 1.0 : 0.0);
+      g_config.Save();
+    }
     lastSceneSaveTick = nowTicks;
   }
 
@@ -3064,6 +3092,10 @@ void OnTimer() {
 
   // v0.12.0-alpha.9: motion event marker generation.
   if (req.generateMotionMarkers) GenerateAllMotionMarkers();
+
+  // v0.16.0-alpha.7: explicit Close button — needed when the viewport
+  // is docked into REAPER's chrome and the titlebar X isn't accessible.
+  if (req.closeViewport) CloseViewportIfNeeded();
 
   // v0.12.0-alpha.10: new-animations modal dispatch removed. Placement is
   // now automatic — ProcessWatcherEvents calls PlacePendingAtCursor
@@ -3576,6 +3608,19 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
     ConsoleLog("[holoroll] WARNING: OLE drag-n-drop init failed; viewport drops disabled.\n");
   }
 
+  // v0.16.0-alpha.9: hook GlViewport's WM_DESTROY so the docker's tab X
+  // click flows through to REAPER's dock cleanup APIs. Without this the
+  // tab X click destroyed the HWND but left dock state stale, breaking
+  // the next Toggle action's re-add. Matches SWS' sws_wnd.cpp pattern:
+  // DockWindowRemove + drop-target unregister + RefreshToolbar(0). The
+  // callback receives the LIVE hwnd (called before hwnd_ is cleared).
+  g_viewport.SetOnDestroyCallback([](HWND hwnd) {
+    drop_target::UnregisterFromHwnd(hwnd);
+    const auto& api = g_bridge.Api();
+    if (api.dockWindowRemove) api.dockWindowRemove(hwnd);
+    if (api.refreshToolbar)   api.refreshToolbar(0);
+  });
+
   // The animations folder is resolved on the first OnTimer tick from the
   // active project's path. No initial folder picker (v0.7.0 ditched the
   // global animations_dir concept). Untitled projects show a hint in the
@@ -3654,6 +3699,15 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
   // spawns the detached PowerShell watchdog that runs the staged
   // installer silently after our DLL is unloaded.
   updater::Start();
+
+  // v0.16.0-alpha.7: open the viewport on REAPER startup unless the
+  // user opted out via Config > "Open on REAPER startup". Default is
+  // ON because most users want HoloRoll visible immediately after
+  // launching REAPER; for those who don't, the toolbar action +
+  // assigned shortcut still works to open it later.
+  if (g_config.GetDouble(kCfgKeyOpenOnStartup, 1.0) >= 0.5) {
+    OpenViewportIfNeeded();
+  }
 
   return 1;
 }
