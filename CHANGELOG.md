@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trade-off — keeps `glb_loader.cpp` aligned with canonical glTF spec
   and shifts the rig-shape contract to where it belongs (the file).
 
+## [0.16.0-alpha.11] — 2026-06-07
+
+CI/Release runner pin.
+
+### Fixed
+- **GitHub Actions builds failing with**
+  `CMake Error at CMakeLists.txt:2 (project): Generator Visual Studio
+  17 2022 could not find any instance of Visual Studio.`
+  Root cause: GitHub started migrating the `windows-latest` runner
+  image from Windows Server 2022 to Windows Server 2025. The new
+  image's Visual Studio install path / registry probe shifted enough
+  that CMake's `Visual Studio 17 2022` generator no longer finds it
+  automatically.
+  Fix: explicit `runs-on: windows-2022` in both `.github/workflows/
+  ci.yml` and `.github/workflows/release.yml`. `windows-2022` still
+  ships VS 2022 17.x with the v143 toolchain and remains supported
+  by GitHub through 2027.
+
+### No functional change
+- Just the runner pin. DLL behaviour, installer payload, version
+  metadata identical to alpha.10.
+
+
 ## [0.16.0-alpha.10] — 2026-06-07
 
 Dock tab X close — the actual fix, finally. Forum-research win.
@@ -2919,7 +2942,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.10...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.11...HEAD
+[0.16.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.11
 [0.16.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.10
 [0.16.0-alpha.9]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.9
 [0.16.0-alpha.8]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.8

@@ -10,7 +10,17 @@ on:
 jobs:
   build:
     name: Build (${{ matrix.preset }})
-    runs-on: windows-latest
+    # v0.16.0-alpha.11: pinned from windows-latest to windows-2022.
+    # GitHub started migrating windows-latest to windows-2025 (Windows
+    # Server 2025) in mid-2026; the new image's Visual Studio install
+    # path / registry probe changed enough that the CMake generator
+    # "Visual Studio 17 2022" couldn't find any instance:
+    #   CMake Error at CMakeLists.txt:2 (project):
+    #     Generator Visual Studio 17 2022
+    #     could not find any instance of Visual Studio.
+    # windows-2022 still ships VS 2022 17.x with the v143 toolchain
+    # and is supported through 2027.
+    runs-on: windows-2022
 
     strategy:
       fail-fast: false

@@ -14,7 +14,10 @@ on:
 jobs:
   build-installer:
     name: Build installer (Windows)
-    runs-on: windows-latest
+    # v0.16.0-alpha.11: pinned to windows-2022 — see ci.yml for the
+    # rationale (windows-latest migration to 2025 broke the VS 2022
+    # generator lookup).
+    runs-on: windows-2022
 
     permissions:
       contents: write   # required to create a Release and upload assets

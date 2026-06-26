@@ -15,4 +15,4 @@
 
 #pragma once
 
-#define HOLOROLL_VERSION_STRING "0.16.0-alpha.10"
+#define HOLOROLL_VERSION_STRING "0.16.0-alpha.11"
