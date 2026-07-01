@@ -3115,6 +3115,64 @@ bool RegisterAction(reaper_plugin_info_t* rec,
   rec->Register("gaccel", outAccel);
   return true;
 }
+
+// ---- v0.16.0-alpha.12 keyboard-focus forwarding (Space to REAPER) ----------
+//
+// Symptom: user reports Space (REAPER's transport play/stop) "works
+// through one, doesn't through the other" while working with HoloRoll.
+// Root cause: whenever the user clicks anywhere inside the HoloRoll
+// viewport (gizmo, an overlay ImGui element, or just to focus the
+// panel), our window becomes the keyboard-focused window. WM_KEYDOWN
+// with VK_SPACE then goes to us, where it's silently absorbed —
+// REAPER's main transport hook never sees it.
+//
+// Canonical REAPER extension fix: register an "accelerator" hook via
+// plugin_register. REAPER calls translateAccel BEFORE dispatching each
+// keyboard message to any window. We return -1 for VK_SPACE addressed
+// at our viewport hwnd — REAPER treats it as if the main window has
+// focus and runs Space's usual transport binding. Same SDK pattern
+// used by SWS' sws_wnd.cpp for shortcut passthrough.
+//
+// Struct definition mirrored verbatim from reaper_plugin.h — we don't
+// include the SDK header directly to keep this shim self-contained.
+struct accelerator_register_t_shim {
+  int (*translateAccel)(MSG* msg, accelerator_register_t_shim* ctx);
+  bool isLocal;
+  void* user;
+};
+
+int HoloRollTranslateAccel(MSG* msg, accelerator_register_t_shim* /*ctx*/) {
+  if (!msg) return 0;
+  // Only intercept keyboard messages — early-out for the flood of
+  // WM_MOUSEMOVE / WM_TIMER etc.
+  if (msg->message != WM_KEYDOWN && msg->message != WM_KEYUP &&
+      msg->message != WM_SYSKEYDOWN && msg->message != WM_SYSKEYUP) {
+    return 0;
+  }
+  // Only VK_SPACE (transport toggle). Leaving other keys alone means
+  // WASD still moves the fly camera, our ImGui sliders still respond
+  // to arrow keys, etc. If more shortcut bleed-through complaints
+  // surface we widen this filter.
+  if (msg->wParam != VK_SPACE) return 0;
+
+  // Only for our viewport (and its ImGui child, if any). If the
+  // message is already going to REAPER's main window this returns
+  // 0 and REAPER handles it normally.
+  HWND vh = g_viewport.Hwnd();
+  if (!vh) return 0;
+  if (msg->hwnd != vh && !IsChild(vh, msg->hwnd)) return 0;
+
+  // -1: pass this keystroke to REAPER's main window as if it had
+  // focus. REAPER's own Space binding (transport play/stop) fires.
+  return -1;
+}
+
+accelerator_register_t_shim g_accelReg = {
+    &HoloRollTranslateAccel,
+    true,     // isLocal — required.
+    nullptr,  // user — unused.
+};
+
 }  // namespace
 
 // ---- v0.12.0-alpha.11 socket-bridge linkage shims -------------------------
@@ -3522,6 +3580,8 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
   if (!rec) {
     if (g_rec) {
       g_rec->Register("-hookcommand", reinterpret_cast<void*>(OnMainAction));
+      // v0.16.0-alpha.12: also drop the keyboard-forwarding hook.
+      g_rec->Register("-accelerator", &g_accelReg);
       if (g_toggleViewportCommandId) g_rec->Register("-gaccel", &g_toggleViewportAction);
       if (g_chooseFolderCommandId) g_rec->Register("-gaccel", &g_chooseFolderAction);
       if (g_placeRegionsCommandId) g_rec->Register("-gaccel", &g_placeRegionsAction);
@@ -3686,6 +3746,11 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
   }
 
   rec->Register("timer", reinterpret_cast<void*>(OnTimer));
+
+  // v0.16.0-alpha.12: accelerator hook so Space (transport play/stop)
+  // works reliably regardless of which HoloRoll widget the user last
+  // clicked. See namespace comment on g_accelReg / HoloRollTranslateAccel.
+  rec->Register("accelerator", &g_accelReg);
 
   // v0.12.0-alpha.11: TCP socket bridge for external command senders.
   // Worker thread + accept loop run independently; OnTimer below

@@ -17,6 +17,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trade-off — keeps `glb_loader.cpp` aligned with canonical glTF spec
   and shifts the rig-shape contract to where it belongs (the file).
 
+## [0.16.0-alpha.12] — 2026-06-08
+
+Space (REAPER transport play/stop) works reliably regardless of what
+the user clicked in HoloRoll.
+
+### Fixed
+- **Space key inconsistency**: users reported that Space sometimes
+  toggled transport, sometimes did nothing — machine-dependent, no
+  clear reproduction. Root cause: whenever the user clicks anywhere
+  inside the HoloRoll viewport (an overlay widget, the gizmo, the
+  scene), our window becomes the keyboard-focused one. `WM_KEYDOWN`
+  with `VK_SPACE` then goes to us and gets silently absorbed (or
+  captured by ImGui's key state, which doesn't run REAPER shortcuts).
+  REAPER's main transport handler never sees the key.
+- alpha.12 registers the canonical **accelerator hook** via
+  `plugin_register("accelerator", …)`. REAPER calls
+  `translateAccel(msg)` BEFORE dispatching each keyboard event to any
+  window. Our handler returns `-1` for `VK_SPACE` events addressed at
+  the HoloRoll HWND (or any child) — REAPER treats the key as if the
+  main window had focus and runs the transport action.
+- Filter is deliberately narrow: only `VK_SPACE`, only for messages
+  targeting our viewport hwnd. WASD still moves the fly camera, ImGui
+  sliders still respond to arrow keys, other REAPER shortcuts follow
+  their normal focus rules.
+
+### Reference
+- [SWS extension — same accelerator-hook pattern in sws_extension.cpp](https://github.com/reaper-oss/sws) — passes keyboard shortcuts through to REAPER whenever an SWS docked window has focus.
+
+
 ## [0.16.0-alpha.11] — 2026-06-07
 
 CI/Release runner pin.
@@ -2942,7 +2971,8 @@ Initial public release.
 - `ImGuiPanelState` (was an unused wrapper around a hardcoded action ID).
 - `ActionBridge` and the F9 / F10 viewport hotkeys.
 
-[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.11...HEAD
+[Unreleased]: https://github.com/Ilia-Smelkov/HoloRoll/compare/v0.16.0-alpha.12...HEAD
+[0.16.0-alpha.12]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.12
 [0.16.0-alpha.11]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.11
 [0.16.0-alpha.10]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.10
 [0.16.0-alpha.9]: https://github.com/Ilia-Smelkov/HoloRoll/releases/tag/v0.16.0-alpha.9
