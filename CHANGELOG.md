@@ -17,6 +17,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trade-off — keeps `glb_loader.cpp` aligned with canonical glTF spec
   and shifts the rig-shape contract to where it belongs (the file).
 
+## [0.16.0-alpha.13] — 2026-07-15
+
+Performance: large-project timelines no longer tank FPS.
+
+### Fixed
+- **200+ HoloRoll items on the timeline caused a ~5× preview
+  slowdown; noticeable lag started around 20 items.** Root cause: on
+  every `OnTimer` tick (~30 Hz) we walked every project item, and for
+  each HoloRoll item we called `IsItemReversedViaChunk` (which alloc-
+  and-zero-filled a 4 MB heap buffer, called
+  `GetItemStateChunk`, and substring-scanned the returned string)
+  plus `GetItemPlayrate` (take-property read). At 200 items × 30 Hz
+  that meant 6000 chunk-reads/sec and ~24 GB/s of transient heap
+  churn — enough to dominate frame time.
+
+  Fix combines three complementary changes:
+
+  1. **Chunk buffer 4 MB → 64 KB** (`kChunkBufferSize`). Real-world
+     HoloRoll chunks are 1-3 KB; the paranoia buffer was pure waste.
+     A truncation heuristic (last-byte check + capacity-match) retries
+     with a 4 MB fallback if we ever see a suspicious 64 KB fill —
+     no data-loss risk for exotic chunks.
+
+  2. **Playhead-based window culling in `EnumProjectItems`.** The
+     function now takes optional `includeChunkInfo` + `playheadSeconds`
+     + `windowSec` parameters. When the playhead is outside an item's
+     `[start - preRoll - slack, end + postRoll + slack]` range, we
+     skip the chunk-read + playrate query entirely and leave the item
+     with default `isReverse=false / playrate=1.0`. Safe because
+     `ResolvePlayheadFromItems` was already going to reject the item
+     on the same test before ever touching those fields. Drops per-
+     tick chunk-reads from 200 → typically 1-3.
+
+  3. **Per-item chunk-info cache** (`g_itemChunkCache`,
+     `unordered_map<MediaItem*, {isReverse, playrate, lastRefreshMs}>`
+     with a 500 ms TTL). Steady-state cost per in-window item drops
+     to one hash lookup. Cache is:
+     - Cleared in `OnProjectChanged` (guards against pointer reuse
+       when items get freed on project switch).
+     - Invalidated per-item in `SetItemPlayrate` and
+       `SetItemReverseViaChunk` so HoloRoll's own writes reflect on
+       the next tick, not up to 500 ms later.
+
+- Shallow callers of `EnumProjectItems` (`FindLastHoloRollItemEnd`,
+  `PlaceOurItemsAndRegions`, `PlacePendingAtCursor`,
+  `GenerateAllMotionMarkers`) don't need `isReverse`/`playrate` and
+  now get them at zero cost — they call the default
+  `EnumProjectItems()` which skips chunk reads entirely. Bonus
+  speedup for placement and marker-generation paths.
+
+### Not changed
+- Memory footprint of the animation library. All GLBs still load into
+  RAM at startup. This turned out to be the *second* bottleneck, not
+  the primary one; user's reported symptoms (5× FPS drop, cache
+  churn) are dominated by the per-tick chunk-read cost, which this
+  release addresses. A follow-up (lazy load + LRU eviction — keep
+  only the ~10 anims nearest the playhead resident) is queued for a
+  later release if memory pressure becomes a complaint.
+
+### Reference
+- REAPER `GetItemStateChunk` / `SetItemStateChunk` — canonical chunk
+  I/O; documented for arbitrary-size chunks with an explicit buffer
+  bound, unlike the legacy `GetSetMediaItemInfo_String("P_CHUNK")`
+  fallback we still keep for very old REAPER builds.
+
+
 ## [0.16.0-alpha.12] — 2026-06-08
 
 Space (REAPER transport play/stop) works reliably regardless of what

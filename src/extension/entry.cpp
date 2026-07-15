@@ -14,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/animation_library.h"
@@ -72,6 +73,14 @@ ULONGLONG g_lastIncomingEventTick = 0;
 bool g_incomingEventsAccumulating = false;
 
 constexpr ULONGLONG kWatcherDebounceMs = 500;
+
+// v0.16.0-alpha.13: forward declarations for the per-item chunk-info
+// cache helpers. Full definitions live further down (near
+// EnumProjectItems), but SetItemPlayrate / SetItemReverseViaChunk are
+// defined earlier and need to invalidate the cache after writes so
+// preview reflects our own changes without waiting for TTL expiry.
+void InvalidateItemChunkCache(MediaItem* item);
+void ClearItemChunkCache();
 
 int g_toggleViewportCommandId = 0;
 int g_chooseFolderCommandId = 0;
@@ -854,6 +863,12 @@ void OnProjectChanged() {
              (newPath.empty() ? std::string("(Untitled)") : newPath) + "\n");
   g_currentProjectPath = newPath;
 
+  // v0.16.0-alpha.13: drop cached chunk info. MediaItem* pointers from
+  // the previous project may be freed and reused for items in the new
+  // one — without clearing we could serve last-project reverse/playrate
+  // to a fresh item with a coincidentally matching pointer.
+  ClearItemChunkCache();
+
   // Move any pending files from Incoming/ into the new project's
   // Animations/. This must run BEFORE RebuildLibraryAndRegions so the
   // initial scan picks them up. RebuildLibraryAndRegions itself may
@@ -1310,6 +1325,12 @@ void SetItemPlayrate(MediaItem* item, double playrate) {
   MediaItem_Take* take = api.getActiveTake(item);
   if (!take) return;
   api.setMediaItemTakeInfo_Value(take, "D_PLAYRATE", playrate);
+  // v0.16.0-alpha.13: bust our per-item chunk cache so the next
+  // OnTimer tick re-reads playrate for this item instead of serving
+  // the pre-write value from cache. Without this, preview would keep
+  // playing at the old speed for up to kItemChunkCacheTtlMs (500 ms)
+  // after the write.
+  InvalidateItemChunkCache(item);
 }
 
 double GetItemPlayrate(MediaItem* item) {
@@ -1360,9 +1381,16 @@ void ReStampItemWithSilentSource(MediaItem* item) {
 // Chunks are at most a few KB for HoloRoll items, so we allocate a
 // generous heap buffer per call (256 KB) and free it immediately.
 
-// v0.14.0-alpha.9: chunks can run large (multi-take items, long FILE
-// paths). 4 MB is paranoia-level — typical HoloRoll chunks are 1-3 KB.
-constexpr std::size_t kChunkBufferSize = 4 * 1024 * 1024;  // 4 MB.
+// v0.16.0-alpha.13: dropped from 4 MB → 64 KB. Typical HoloRoll item
+// chunks are 1-3 KB; the 4 MB paranoia-buffer was allocating +
+// zero-filling +4 MB per call, and with EnumProjectItems calling
+// ReadItemChunk once per item per OnTimer tick, a 200-item project
+// churned ~24 GB/s of heap allocation just here. 64 KB covers even
+// pathological multi-take chunks; if we ever hit truncation, we'll
+// detect it (buffer completely filled, no trailing '\0') and retry
+// with a bigger buffer.
+constexpr std::size_t kChunkBufferSize = 64 * 1024;  // 64 KB.
+constexpr std::size_t kChunkBufferSizeMax = 4 * 1024 * 1024;  // 4 MB fallback.
 
 // Read item's serialised state chunk via REAPER's canonical
 // GetSetItemStateChunk API. Falls back to GetSetMediaItemInfo_String
@@ -1391,11 +1419,39 @@ std::string ReadItemChunk(MediaItem* item) {
   // size, modern REAPER SDK. Buffer initialised to zeros so the
   // returned string is properly null-terminated even if REAPER doesn't
   // explicitly null-terminate on its end.
+  //
+  // v0.16.0-alpha.13: two-tier buffer — start at 64 KB (covers >99% of
+  // real-world HoloRoll chunks), retry with 4 MB if we suspect
+  // truncation (last byte non-zero AND strlen == buffer size - 1).
   if (api.getItemStateChunk) {
     std::vector<char> buf(kChunkBufferSize, '\0');
-    const bool ok = api.getItemStateChunk(item, buf.data(),
-                                          static_cast<int>(buf.size()),
-                                          false);
+    bool ok = api.getItemStateChunk(item, buf.data(),
+                                    static_cast<int>(buf.size()),
+                                    false);
+    // Truncation heuristic: REAPER writes up to `buflen - 1` bytes and
+    // (usually) null-terminates. If strlen equals capacity-1 AND the
+    // last-before-null byte is not a natural chunk closer ('>' / '\n'),
+    // we probably ran out of room. Retry with the max buffer.
+    if (ok) {
+      const std::size_t n = std::strlen(buf.data());
+      const bool suspectTruncated = (n >= buf.size() - 2) &&
+                                    (n > 0) &&
+                                    (buf[n - 1] != '>') &&
+                                    (buf[n - 1] != '\n');
+      if (suspectTruncated) {
+        std::vector<char> big(kChunkBufferSizeMax, '\0');
+        const bool bigOk = api.getItemStateChunk(item, big.data(),
+                                                 static_cast<int>(big.size()),
+                                                 false);
+        if (bigOk) {
+          if (shouldLogFirst) {
+            SpikeLog("[holoroll-reverse] ReadItemChunk retry with 4MB buffer "
+                     "(64KB suspected truncated at n=" + std::to_string(n) + ")\n");
+          }
+          return std::string(big.data());
+        }
+      }
+    }
     if (shouldLogFirst) {
       SpikeLog("[holoroll-reverse] ReadItemChunk first call: "
                "GetItemStateChunk -> " +
@@ -1610,7 +1666,11 @@ bool SetItemReverseViaChunk(MediaItem* item, double sourceLength) {
   if (chunk.find("<SOURCE SECTION") != std::string::npos) return true;  // already wrapped.
   const std::string wrapped = WrapSourceInSectionReverse(chunk, sourceLength);
   if (wrapped == chunk) return false;  // no SOURCE block to wrap.
-  return WriteItemChunk(item, wrapped);
+  const bool ok = WriteItemChunk(item, wrapped);
+  // v0.16.0-alpha.13: bust per-item cache so the reverse flag is
+  // reflected on the very next preview tick, not up to 500 ms later.
+  if (ok) InvalidateItemChunkCache(item);
+  return ok;
 }
 
 // v0.14.0-alpha.6: CloneItemAtPosition removed. Reverse-unit path now
@@ -2153,11 +2213,78 @@ struct DiscoveredItem {
   double playrate = 1.0;
 };
 
+// v0.16.0-alpha.13: per-item chunk-info cache. Populated inside
+// EnumProjectItems when includeChunkInfo=true; short TTL so user edits
+// (drag/resize/right-click "Item properties → reverse") reflect within
+// half a second without us having to hook every REAPER change event.
+//
+// Rationale: `IsItemReversedViaChunk` reads P_CHUNK (heap alloc, string
+// scan, syscall) and `GetItemPlayrate` reads a take property (cheaper
+// but not free). Both were called per-item per-OnTimer-tick — with
+// 200 items × 30 Hz that's 6000 chunk reads/sec, dominant cost of the
+// slowdown the user reported. Cache turns >99% of those into a hash
+// lookup.
+//
+// Keyed by MediaItem* pointer. On project change we clear the whole
+// map so pointer-reuse after item deletion can't feed stale data to a
+// new item. TTL further bounds staleness (500 ms → next OnTimer tick
+// after user edit picks up new state).
+//
+// Invalidated explicitly after HoloRoll's own writes (SetItemPlayrate,
+// SetItemReverseViaChunk) so preview updates instantly on our OWN
+// user actions instead of waiting for TTL expiry.
+struct ItemChunkInfoCache {
+  bool isReverse = false;
+  double playrate = 1.0;
+  DWORD lastRefreshMs = 0;
+};
+std::unordered_map<MediaItem*, ItemChunkInfoCache> g_itemChunkCache;
+constexpr DWORD kItemChunkCacheTtlMs = 500;
+
+// Called after a HoloRoll-side write that would change chunk-derived
+// state for this item. Cheap no-op if the item isn't cached yet.
+void InvalidateItemChunkCache(MediaItem* item) {
+  if (!item) return;
+  g_itemChunkCache.erase(item);
+}
+
+// Cleared on project change (Open / Save As / Switch / Close). Also
+// called on shutdown for tidiness (map lives in BSS; not strictly
+// needed but keeps leak sanitisers happy).
+void ClearItemChunkCache() {
+  g_itemChunkCache.clear();
+}
+
 // Walk every track in the project, then every item on each track, and return
 // items that have a non-empty name AND carry our P_EXT marker. The marker
 // check (added in v0.9.1) prevents accidental matches with audio/midi/video
 // items the user happens to have named the same as one of our animations.
-std::vector<DiscoveredItem> EnumProjectItems() {
+//
+// v0.16.0-alpha.13: split into "shallow" (positions + name, cheap) and
+// "chunk-informed" (adds isReverse + playrate, expensive). Callers that
+// only need name/position — placement de-dup, motion-marker generation,
+// last-item probe — pass includeChunkInfo=false and skip the chunk
+// pipeline entirely. The OnTimer resolver path passes true PLUS a
+// playhead-based window so we only chunk-read items near the cursor;
+// items far offscreen still get returned (name/position populated) but
+// with default isReverse=false / playrate=1.0 — safe because
+// ResolvePlayheadFromItems filters them out by the same window before
+// ever touching those fields.
+//
+// Parameters:
+//   includeChunkInfo : populate di.isReverse / di.playrate from chunks.
+//   playheadSeconds  : current cursor (only used when includeChunkInfo).
+//   windowSec        : extra slack around the resolver's match window.
+//                      0 means "exact resolver window"; a small positive
+//                      value (~1 s) hides edge-case tick jitter.
+//   globalPreRoll    : mirror the resolver's pre-roll expansion.
+//   globalPostRoll   : mirror the resolver's post-roll expansion.
+std::vector<DiscoveredItem> EnumProjectItems(
+    bool includeChunkInfo = false,
+    double playheadSeconds = 0.0,
+    double windowSec = 0.0,
+    float globalPreRoll = 0.0f,
+    float globalPostRoll = 0.0f) {
   std::vector<DiscoveredItem> out;
   const auto& api = g_bridge.Api();
   if (!api.countTracks || !api.getTrack || !api.countTrackMediaItems ||
@@ -2188,13 +2315,52 @@ std::vector<DiscoveredItem> EnumProjectItems() {
       // global current settings drive playback now.
       di.preRollSec = 0.0f;
       di.postRollSec = 0.0f;
-      // v0.14.0-alpha.5: detect SECTION/MODE 2 reverse via chunk
-      // inspection. Cost: one P_CHUNK read per item per OnTimer tick.
-      // HoloRoll items have ~1-3 KB chunks and substring search is
-      // O(n) — fine for the ~tens of items typical in a project.
-      di.isReverse = IsItemReversedViaChunk(item);
-      // v0.15.0-alpha.1: take playrate for slowdown.
-      di.playrate = GetItemPlayrate(item);
+
+      // v0.16.0-alpha.13: two-gate chunk-info fetch.
+      //
+      // Gate 1 (caller): includeChunkInfo=false skips it entirely.
+      //   Used by placement de-dup, motion-marker generation,
+      //   FindLastHoloRollItemEnd — none of these need reverse/playrate.
+      //
+      // Gate 2 (window): if the item's time range plus pre/post-roll
+      //   plus a small slack doesn't overlap the playhead, skip.
+      //   ResolvePlayheadFromItems is going to reject this item on the
+      //   same test anyway, so isReverse/playrate would go unused.
+      //
+      // Anything past both gates hits the cache (500 ms TTL). Steady-
+      // state cost: one unordered_map lookup per item per tick. Chunk
+      // reads only fire on first observation, after invalidation, or
+      // when a user edit is old enough to age the entry out.
+      bool needChunk = includeChunkInfo;
+      if (needChunk && windowSec > 0.0) {
+        const double matchStart = di.startSeconds -
+                                  static_cast<double>(globalPreRoll) - windowSec;
+        const double matchEnd   = di.endSeconds   +
+                                  static_cast<double>(globalPostRoll) + windowSec;
+        if (playheadSeconds < matchStart || playheadSeconds > matchEnd) {
+          needChunk = false;
+        }
+      }
+
+      if (needChunk) {
+        const DWORD nowMs = GetTickCount();
+        auto it = g_itemChunkCache.find(item);
+        if (it != g_itemChunkCache.end() &&
+            (nowMs - it->second.lastRefreshMs) < kItemChunkCacheTtlMs) {
+          di.isReverse = it->second.isReverse;
+          di.playrate  = it->second.playrate;
+        } else {
+          di.isReverse = IsItemReversedViaChunk(item);
+          di.playrate  = GetItemPlayrate(item);
+          ItemChunkInfoCache& slot = g_itemChunkCache[item];
+          slot.isReverse    = di.isReverse;
+          slot.playrate     = di.playrate;
+          slot.lastRefreshMs = nowMs;
+        }
+      }
+      // else: leave defaults isReverse=false, playrate=1.0 (already
+      // initialised in the DiscoveredItem struct).
+
       out.push_back(std::move(di));
     }
   }
@@ -2943,9 +3109,19 @@ void OnTimer() {
   // v0.11.1: pull GLOBAL pre/post-roll from current placement settings;
   // the resolver expands the match window by these values so the playhead
   // visually "holds" frame 0 / last frame in the buffer zones around items.
-  const std::vector<DiscoveredItem> items = EnumProjectItems();
+  //
+  // v0.16.0-alpha.13: pass includeChunkInfo=true + playhead + a small
+  // slack window so EnumProjectItems only chunk-reads items that could
+  // plausibly be the active one. On a 200-item project this drops the
+  // per-tick chunk-read count from ~200 to a handful (typically 1-3).
+  // The extra windowSec (1 s) hides tick-to-tick playhead motion so we
+  // don't flap chunk info as the cursor crosses an item boundary.
   float globalPreRoll = 1.0f, globalPostRoll = 1.0f;
   g_viewport.GetPlacementOptions(&globalPreRoll, &globalPostRoll);
+  constexpr double kChunkCullSlackSec = 1.0;
+  const std::vector<DiscoveredItem> items = EnumProjectItems(
+      /*includeChunkInfo=*/true, timelineTime, kChunkCullSlackSec,
+      globalPreRoll, globalPostRoll);
   const ItemResolveResult itemResult = ResolvePlayheadFromItems(
       timelineTime, GetFps(), items, globalPreRoll, globalPostRoll);
 
