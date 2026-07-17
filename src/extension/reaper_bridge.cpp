@@ -64,6 +64,8 @@ bool ResolveReaperApi(reaper_plugin_info_t* rec, ReaperApi& api) {
   api.envelope_SortPoints = reinterpret_cast<Envelope_SortPointsFn>(rec->GetFunc("Envelope_SortPoints"));
   api.deleteEnvelopePointRange = reinterpret_cast<DeleteEnvelopePointRangeFn>(rec->GetFunc("DeleteEnvelopePointRange"));
   api.trackFX_GetNumParams = reinterpret_cast<TrackFX_GetNumParamsFn>(rec->GetFunc("TrackFX_GetNumParams"));
+  // v0.17.0-alpha.1: live slider write for the spatializer JSFX.
+  api.trackFX_SetParam = reinterpret_cast<TrackFX_SetParamFn>(rec->GetFunc("TrackFX_SetParam"));
 
   // v0.12.0-alpha.7: envelope state-chunk APIs (used to flip VIS to 1
   // so freshly written envelopes appear without manual FX-window open).

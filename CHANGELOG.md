@@ -17,6 +17,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trade-off — keeps `glb_loader.cpp` aligned with canonical glTF spec
   and shifts the rig-shape contract to where it belongs (the file).
 
+## [0.17.0-alpha.1] — 2026-07-16
+
+New feature line: **audio spatializer**. Route external audio through
+the HoloRoll parent track and have it attenuate + narrow with 3D
+preview distance.
+
+### Post-tag fixes (same alpha, incremental)
+- **JSFX syntax error at `@sample` line 59**: `bypass_now ? ( /*
+  comment only */ ) : (...)` — EEL2 rejects comment-only ternary
+  branches. Added an explicit `gain = 1;` no-op in the bypass branch
+  and stripped multi-byte unicode arrows from `@sample` comments
+  (some EEL2 builds trip on non-ASCII inside DSP blocks).
+- **Left/right pan didn't move with the camera**: initial JSFX had
+  only distance-based gain + stereo width mixing, no panning
+  proper. Added `slider6:pan` (envelope-driven) + equal-power stereo
+  pan in `@sample`. Extension computes pan from the horizontal angle
+  between camera-forward and the vector from camera to model origin
+  — as the user rotates the preview, the sound moves across the
+  stereo field. Added `GlViewport::GetCameraOrientation()` getter
+  (yaw/pitch in degrees) to feed the math.
+
+### Added
+- **`holoroll_spatial.jsfx`** — new stereo in/out DSP on the HoloRoll
+  parent track. Reads `distance` and `spread` sliders (extension
+  writes live via `TrackFX_SetParam` each OnTimer tick, no envelope
+  points), applies distance-based gain attenuation and stereo width
+  mixing. Static params (max distance, curve type) come from the UI.
+- **Attenuation presets**: 10 / 20 / 30 / 50 / 100 metres from a
+  dropdown, plus a Custom slider for anything in between.
+- **Curve types**: Linear, Logarithmic, Exponential, InverseDistance
+  (all normalised: gain=1 at 0 m, gain=0 at max distance).
+- **Stereo spread envelope** with independent near/far endpoints
+  (default 0.2 → 0.0). Extension interpolates using the same curve
+  as gain — close sounds carry some stereo width, distant sounds
+  collapse to a point source.
+- **UI panel**: new "Spatializer" collapsing section in the overlay,
+  right after Camera. Master enable checkbox (OFF by default), preset
+  dropdown, curve dropdown, spread near/far sliders, contextual hint
+  text about routing.
+- **Auto-bypass during render**: JSFX checks `play_state & 4` and
+  passes audio through unchanged when REAPER is in offline-render
+  mode. Manual Bypass slider on the JSFX as fallback for REAPER
+  builds that don't set that bit.
+- **API binding**: `TrackFX_SetParam` (`TrackFX_SetParamFn`) in
+  `reaper_api.h` + `reaper_bridge.cpp`. Used by the live spatializer
+  update path.
+- **Config keys**: `spatial.enabled`, `spatial.max_distance`,
+  `spatial.curve_type`, `spatial.spread_start`, `spatial.spread_end`.
+  All global — one config drives every placed item.
+- **Camera-position getter**: `GlViewport::GetCameraWorldPos()` for
+  extension-side distance computation.
+
+### Changed
+- **Motion envelope writing disabled** across all six call sites
+  (`PlaceOurItemsAndRegions`, `PlacePendingAtCursor`,
+  `PlaceSingleAtCursor`, three branches in `holoroll_build_regions`).
+  The pipeline (`WriteMotionEnvelopesForItem`, `TopNActiveBones`,
+  slider layout in `holoroll_motion.jsfx`) is intact behind `#if 0`;
+  re-enabling is a one-line revert when the motion-driven use case
+  returns. Motion FX still gets added to the track for backward
+  compat with 0.16.x projects — it just becomes a cosmetic no-op.
+
+### Design notes
+- Position source = **model origin** at world (0, 0, 0) in glTF space
+  (mesh is rendered centred on the origin). Simple, stable, works
+  identically across models.
+- Listener position = **rendered camera world position** (smoothed,
+  matches what the user sees).
+- Communication = **live `TrackFX_SetParam` per tick**, not envelope
+  points. Preview only — render is auto-bypassed so we don't need to
+  bake automation. Automation lane stays clean.
+- User workflow: drop audio tracks as REAPER **children** of the
+  HoloRoll parent track. REAPER's default child-hears-parent bus
+  pipes their signal through the parent FX chain, where the
+  spatializer picks it up. No custom send-routing required.
+
+### Deferred to alpha.2
+- Per-animation attenuation override (`spatial.per_anim.<name>.*`,
+  mirrors the `CameraConfig` pattern).
+- Custom point-editor for user-authored curves (currently just the
+  four preset shapes).
+- Per-animation audio-file assignment (auto-play sound when a
+  specific animation is active).
+
+
 ## [0.16.0-alpha.13] — 2026-07-15
 
 Performance: large-project timelines no longer tank FPS.

@@ -1319,6 +1319,110 @@ void GlViewport::DrawOverlay(double playPositionSeconds,
 #endif  // Camera Attached-mode UI hidden in alpha.7.
   }
 
+  // v0.17.0-alpha.1: audio spatializer panel. Toggles the parent-track
+  // JSFX that attenuates + narrows child-track audio based on 3D
+  // preview distance. User routes their audio tracks as children of
+  // the HoloRoll parent track; REAPER's default child-to-parent bus
+  // pipe flows the signal through the FX chain and this DSP picks it
+  // up. Off by default — plugin is fully dormant when disabled.
+  if (ImGui::CollapsingHeader("Spatializer", ImGuiTreeNodeFlags_DefaultOpen)) {
+    bool enabled = spatialConfig_.enabled;
+    if (ImGui::Checkbox("Spatialize", &enabled)) {
+      spatialConfig_.enabled = enabled;
+      spatialDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Attenuate the parent-track audio based on 3D preview distance\n"
+          "(camera to model origin). Route your audio tracks as CHILDREN\n"
+          "of the HoloRoll track so their signal flows through this DSP.\n"
+          "Auto-bypasses during offline render — final mix is dry.");
+    }
+
+    // Hint block (always visible; small text so it doesn't dominate).
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.75f, 0.85f, 1.0f));
+    ImGui::TextWrapped(
+        "Hint: drag audio tracks under the HoloRoll parent track (make\n"
+        "them children in REAPER's TCP). Their sound will route through\n"
+        "the spatializer JSFX on the parent.");
+    ImGui::PopStyleColor();
+
+    // Everything below is greyed out when Spatialize is off — user can
+    // still read/tune presets without them taking effect.
+    ImGui::BeginDisabled(!enabled);
+
+    // Attenuation preset dropdown. Values match user spec:
+    // 10 / 20 / 30 / 50 / 100 metres. Custom picks the current value
+    // (any float in the slider) and lets user drag it.
+    ImGui::Separator();
+    constexpr float kPresets[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
+    constexpr int kNumPresets = static_cast<int>(sizeof(kPresets) / sizeof(kPresets[0]));
+    int selectedPreset = -1;
+    for (int i = 0; i < kNumPresets; ++i) {
+      if (std::abs(spatialConfig_.maxDistance - kPresets[i]) < 0.01f) {
+        selectedPreset = i;
+        break;
+      }
+    }
+    // Build display: "10 m", "20 m", ..., "Custom" if none match.
+    const char* labels[6] = {"10 m", "20 m", "30 m", "50 m", "100 m", "Custom"};
+    int currentIdx = (selectedPreset >= 0) ? selectedPreset : 5;
+    if (ImGui::Combo("Max distance", &currentIdx, labels, IM_ARRAYSIZE(labels))) {
+      if (currentIdx < kNumPresets) {
+        spatialConfig_.maxDistance = kPresets[currentIdx];
+        spatialDirty_ = true;
+      }
+      // Custom: keep the existing value, user tweaks with the slider below.
+    }
+    // If Custom is selected (no preset match), expose a slider.
+    if (selectedPreset < 0) {
+      if (ImGui::SliderFloat("Custom (m)", &spatialConfig_.maxDistance,
+                              1.0f, 500.0f, "%.1f")) {
+        spatialDirty_ = true;
+      }
+    }
+
+    // Curve type dropdown. Four presets, matches JSFX slider4 enum.
+    const char* curveLabels[] = {"Linear", "Logarithmic", "Exponential",
+                                 "InverseDistance"};
+    if (ImGui::Combo("Curve", &spatialConfig_.curveType, curveLabels,
+                      IM_ARRAYSIZE(curveLabels))) {
+      spatialDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Falloff shape from 0 m (full volume) to Max distance (silent):\n"
+          "  Linear         : straight line\n"
+          "  Logarithmic    : heavy near, gentle far\n"
+          "  Exponential    : gentle near, steep far\n"
+          "  InverseDistance: 1/(1+kd) rescaled to hit 0 at max");
+    }
+
+    // Spread endpoints. Extension interpolates start→end using the same
+    // curve so at distance 0 spread=start (some stereo width), at max
+    // distance spread=end (typically 0 = collapse to mono point source).
+    ImGui::Separator();
+    ImGui::TextDisabled("Stereo spread (envelope from close → far)");
+    if (ImGui::SliderFloat("Spread near", &spatialConfig_.spreadStart,
+                            0.0f, 1.0f, "%.2f")) {
+      spatialDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Stereo width at 0 m (source position).\n"
+                        "1.0 = full original stereo, 0.0 = mono collapse.");
+    }
+    if (ImGui::SliderFloat("Spread far", &spatialConfig_.spreadEnd,
+                            0.0f, 1.0f, "%.2f")) {
+      spatialDirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Stereo width at max distance.\n"
+                        "1.0 = full original stereo, 0.0 = mono collapse.");
+    }
+
+    ImGui::EndDisabled();
+  }
+
   if (ImGui::CollapsingHeader("Object", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Checkbox("Show rotation gizmo", &showGizmo_);
     constexpr float kRotMin = -360.0f;
@@ -2114,6 +2218,40 @@ bool GlViewport::ConsumeSkeletonDirty() {
   const bool was = skeletonDirty_;
   skeletonDirty_ = false;
   return was;
+}
+
+// v0.17.0-alpha.1 spatializer accessors.
+void GlViewport::SetSpatialConfig(const SpatialConfig& cfg) {
+  spatialConfig_ = cfg;
+  // Set is used by config-load AND by UI edits. We can't distinguish
+  // here, so cheap: don't set dirty — the UI panel below sets it
+  // explicitly when the user changes a control (mirrors CameraConfig
+  // pattern). Config-load call site therefore never spuriously
+  // re-writes the same values back to disk.
+}
+const GlViewport::SpatialConfig& GlViewport::GetSpatialConfig() const {
+  return spatialConfig_;
+}
+bool GlViewport::ConsumeSpatialDirty() {
+  const bool was = spatialDirty_;
+  spatialDirty_ = false;
+  return was;
+}
+
+// Smoothed (rendered) camera position readback. Extension calls this
+// each OnTimer tick to compute distance for the spatializer JSFX.
+void GlViewport::GetCameraWorldPos(float* x, float* y, float* z) const {
+  if (x) *x = cameraPosX_;
+  if (y) *y = cameraPosY_;
+  if (z) *z = cameraPosZ_;
+}
+
+// Smoothed camera yaw + pitch in radians. Extension builds the
+// camera-forward / camera-right basis from these to compute the
+// left/right stereo pan for the spatializer.
+void GlViewport::GetCameraOrientation(float* yaw, float* pitch) const {
+  if (yaw)   *yaw   = cameraYaw_;
+  if (pitch) *pitch = cameraPitch_;
 }
 
 // v0.16.0-alpha.2: render skeleton bones (lines connecting child →

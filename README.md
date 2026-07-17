@@ -52,6 +52,14 @@ layer sounds on top of.
   metres.
 - **3/4 default framing.** New animations snap to a Blender-style
   front-right-top view, with the camera distance auto-fit to the model.
+- **Audio spatializer (v0.17).** Route your audio tracks through the
+  HoloRoll parent track and their volume attenuates + stereo width
+  narrows as the 3D preview camera moves away from the model. Four
+  falloff curves (linear / log / exp / inverse), preset attenuation
+  distances (10 / 20 / 30 / 50 / 100 m), and per-endpoint stereo
+  spread. Off by default; auto-bypasses during offline render so the
+  final mix stays dry. See [Audio spatializer](#audio-spatializer)
+  below.
 
 ## Formats
 
@@ -105,6 +113,50 @@ Requirements: Windows 10/11 x64, Visual Studio 2022, CMake 3.24+.
 | Mouse wheel | Adjust fly speed |
 | LMB drag on rotation gizmo arc | Rotate object around that axis |
 | `Reset camera` button | Snap to 3/4 default framing |
+
+## Audio spatializer
+
+The Spatializer section in the overlay routes any audio you send to
+the HoloRoll track through a distance-based attenuation + stereo
+width plugin. The effect is driven by the 3D preview camera's
+position relative to the model — flying away from the model makes
+audio quieter and narrower.
+
+**Setup**
+
+1. In the overlay's Spatializer section, check `Spatialize` (off by
+   default).
+2. In REAPER's TCP, drag the audio tracks you want spatialized
+   **under** the HoloRoll parent track — make them children. REAPER's
+   default parent-hears-child routing pipes their signal through the
+   parent FX chain, where the spatializer picks it up. No custom
+   sends needed.
+3. Pick a `Max distance` preset (10 / 20 / 30 / 50 / 100 m, or use
+   the Custom slider) — this is the distance at which audio hits
+   silence. Should roughly match your scene scale.
+4. Optionally change the `Curve` (Linear, Logarithmic, Exponential,
+   InverseDistance) and the `Spread near` / `Spread far` endpoints
+   (default 0.2 → 0 = "some stereo width close, collapses to point
+   source far away").
+
+**What happens under the hood**
+
+- On the HoloRoll parent track, a JSFX called `HoloRoll Spatializer`
+  gets added the first time you enable the checkbox.
+- Every OnTimer tick (~30 Hz), the extension writes the current
+  camera-to-origin distance and the interpolated spread value into
+  the JSFX's sliders via `TrackFX_SetParam`. No envelope points — the
+  automation lane stays clean.
+- The JSFX applies gain (curve-shaped) and stereo width mixing to
+  everything routed through it.
+- During REAPER's offline render, the JSFX detects
+  `play_state & 4` and passes audio through unchanged, so your
+  final render is dry (unaffected by preview-time camera position).
+
+**Settings scope in v0.17.0-alpha.1**
+
+Global — one spatializer config applies to every placed HoloRoll
+item. Per-animation override is planned for alpha.2.
 
 ## Roadmap
 

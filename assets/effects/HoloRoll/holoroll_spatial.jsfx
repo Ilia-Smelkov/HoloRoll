@@ -1,0 +1,123 @@
+desc:HoloRoll Spatializer
+
+// v0.17.0-alpha.1: distance-based attenuation + stereo spread.
+//
+// Live-driven from the HoloRoll extension: `distance` and `spread`
+// sliders get updated via TrackFX_SetParam every OnTimer tick, based
+// on the 3D-preview camera's position relative to the model origin
+// (world 0,0,0 in glTF space).
+//
+// User-visible sliders control the "curve shape" (max distance +
+// dropoff curve type) and manual bypass. Attenuation values 10 / 20 /
+// 30 / 50 / 100 m come from the extension UI's preset dropdown.
+//
+// AUDIO ROUTING:
+//   User routes their audio tracks as CHILDREN of the HoloRoll parent
+//   track. REAPER's default parent-hears-child bus mix routes the
+//   audio through HoloRoll's FX chain -- this plugin picks it up and
+//   applies distance attenuation + stereo width based on the current
+//   preview camera position. Sound "sits" at the model, attenuates as
+//   the camera moves away.
+//
+// RENDER AUTO-BYPASS:
+//   `play_state & 4` -- REAPER treats offline render as record state
+//   for JSFX purposes on modern builds. When that bit is set, we
+//   passthrough audio unchanged so the final render is DRY. If your
+//   REAPER build doesn't set that bit during render, use the manual
+//   Bypass slider.
+//
+// alpha.1 fix (jsfx-syntax): kept ASCII-only comments (some EEL2
+// builds choke on multi-byte unicode dashes inside @sample), and
+// ensured every ternary branch contains at least one real expression
+// (empty comment-only parens ( /* ... */ ) are a syntax error in
+// EEL2).
+
+slider1:0<0,1000,0.01>-Distance (envelope-driven, hidden)
+slider2:0.2<0,1,0.001>-Spread (envelope-driven, hidden)
+slider3:20<10,500,1>Max Distance (m)
+slider4:0<0,3,1{Linear,Logarithmic,Exponential,InverseDistance}>Curve Type
+slider5:0<0,1,1{Off,On}>Bypass (manual)
+slider6:0<-1,1,0.001>-Pan (envelope-driven, hidden)
+
+in_pin:left in
+in_pin:right in
+out_pin:left out
+out_pin:right out
+
+@init
+max_dist = 20;
+curve_id = 0;
+manual_bypass = 0;
+
+@slider
+max_dist = slider3 > 0 ? slider3 : 1;
+curve_id = slider4;
+manual_bypass = slider5 >= 0.5;
+
+@sample
+is_rendering = (play_state & 4) != 0;
+bypass_now = manual_bypass || is_rendering;
+
+bypass_now ? (
+  // Passthrough. Explicit no-op assignment keeps EEL2's parser happy
+  // (empty parens are a syntax error).
+  gain = 1;
+) : (
+  d = slider1;
+  s = slider2;
+
+  // Normalise distance into [0, 1]. Beyond max_dist -> silent.
+  n = d / max_dist;
+  n < 0 ? n = 0;
+  n > 1 ? n = 1;
+
+  // Gain curve. All four normalised to gain=1 at n=0 and gain=0 at n=1.
+  curve_id == 0 ? (
+    // Linear.
+    gain = 1 - n;
+  ) : curve_id == 1 ? (
+    // Logarithmic: heavy attenuation near source, gentle far.
+    // log10(1) = 0, log10(10) = 1 -- we stretch n over [1..10].
+    gain = 1 - log10(1 + 9 * n);
+  ) : curve_id == 2 ? (
+    // Exponential: gentle near, steep far. (1-n)^2.
+    inv = 1 - n;
+    gain = inv * inv;
+  ) : (
+    // InverseDistance-ish: 1 / (1 + k*n), scaled so gain(0)=1, gain(1)=0.
+    // Raw: 1 / (1 + 10n). Rescale so gain(1)=0.
+    raw = 1 / (1 + 10 * n);
+    gain = (raw - 1/11) / (1 - 1/11);
+    gain < 0 ? gain = 0;
+  );
+
+  // Stereo spread mixing.
+  //   s = 1 -> full original stereo (L->L, R->R).
+  //   s = 0 -> mono collapse (both channels = (L+R)/2).
+  // Extension typically drives s from 0.2 at close down to 0.0 at max
+  // (distant sounds collapse to a point).
+  mono = (spl0 + spl1) * 0.5;
+  spl0 = mono + s * (spl0 - mono);
+  spl1 = mono + s * (spl1 - mono);
+
+  // Equal-power stereo panning driven by camera direction.
+  //   pan = -1 -> hard left
+  //   pan =  0 -> centred
+  //   pan = +1 -> hard right
+  // Extension computes `pan` from the horizontal angle between the
+  // camera-forward axis and the vector from camera to the sound
+  // source (model origin), so as the user rotates the preview the
+  // sound moves in the stereo field accordingly.
+  //
+  // Equal-power law: at centre both channels get sqrt(2)/2 -- keeps
+  // perceived loudness constant as the source pans across the field.
+  p = slider6;
+  p < -1 ? p = -1;
+  p >  1 ? p =  1;
+  t = (p + 1) * 0.25 * $pi;   // maps [-1..1] to [0..pi/2]
+  lg = cos(t);
+  rg = sin(t);
+
+  spl0 = spl0 * lg * gain;
+  spl1 = spl1 * rg * gain;
+);

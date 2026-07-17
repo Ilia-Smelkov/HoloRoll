@@ -237,6 +237,69 @@ class GlViewport {
   bool GetSkeletonVisible() const;
   bool ConsumeSkeletonDirty();
 
+  // ---- v0.17.0-alpha.1 spatializer -------------------------------------
+  //
+  // Distance-based volume attenuation + stereo spread applied by the
+  // HoloRoll spatializer JSFX on the parent track. The extension
+  // computes distance = ||cameraWorld - modelOrigin|| each OnTimer tick
+  // and writes it directly to the JSFX's distance/spread sliders via
+  // TrackFX_SetParam (no envelope points — clean automation lane).
+  //
+  // User routes audio tracks as CHILDREN of the HoloRoll parent track;
+  // REAPER's default parent-hears-child bus routes their signal through
+  // the parent FX chain, so this DSP picks it up.
+  //
+  // Auto-bypass during render: JSFX side checks `play_state & 4`, which
+  // REAPER sets for offline render on modern builds.
+  //
+  // MVP scope: global settings only (all placed items use the same
+  // curve). Per-animation override is planned for alpha.2, using the
+  // same sanitised-name-based config pattern as CameraConfig.
+  struct SpatialConfig {
+    // Master enable. When false, the JSFX is not added to the track and
+    // distance/spread sliders are never touched — plugin is fully
+    // dormant for users who don't need spatialization.
+    bool enabled = false;
+
+    // Max distance in glTF-scene units (typically metres for models
+    // exported at real-world scale). Beyond this, gain = 0. Preset
+    // dropdown offers 10 / 20 / 30 / 50 / 100.
+    float maxDistance = 20.0f;
+
+    // Attenuation curve preset. Matches the JSFX slider4 enum:
+    //   0 = Linear
+    //   1 = Logarithmic (heavy near, gentle far)
+    //   2 = Exponential (gentle near, steep far)
+    //   3 = InverseDistance (rescaled 1/(1+kd), normalised)
+    int curveType = 0;
+
+    // Spread envelope endpoints. Extension interpolates start→end along
+    // the same curve as gain (single curveType drives both). Default
+    // 0.2 → 0.0 means "some stereo width at source, collapse to point
+    // at max distance" — the acoustically natural direction.
+    //   spread = 0 → mono collapse (both channels = (L+R)/2)
+    //   spread = 1 → full original stereo width
+    float spreadStart = 0.2f;
+    float spreadEnd   = 0.0f;
+  };
+  void SetSpatialConfig(const SpatialConfig& cfg);
+  const SpatialConfig& GetSpatialConfig() const;
+  bool ConsumeSpatialDirty();
+
+  // World-space camera position readback. Extension calls this each
+  // tick to compute distance for the spatializer. Uses the smoothed
+  // (rendered) position, not the target — audible smoothness matters
+  // more than input-latency correctness here.
+  void GetCameraWorldPos(float* x, float* y, float* z) const;
+
+  // Camera yaw + pitch (rendered/smoothed) in DEGREES — matches
+  // ApplyCameraTransform's glRotatef call convention. Extension uses
+  // these to build the camera basis for stereo-pan computation —
+  // horizontal angle between camera-forward and the vector from
+  // camera to source drives left/right panning. Caller is responsible
+  // for degrees->radians conversion before trig.
+  void GetCameraOrientation(float* yaw, float* pitch) const;
+
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   bool CreateContext();
@@ -372,6 +435,10 @@ class GlViewport {
   // v0.16.0-alpha.2 skeleton visualisation.
   bool showSkeleton_ = false;
   bool skeletonDirty_ = false;
+
+  // v0.17.0-alpha.1 spatializer state. See public SpatialConfig doc.
+  SpatialConfig spatialConfig_;
+  bool spatialDirty_ = false;
 
   // v0.16.0-alpha.3: per-frame projected joint positions in viewport
   // pixel coordinates. Populated by DrawSkeleton; consumed by the

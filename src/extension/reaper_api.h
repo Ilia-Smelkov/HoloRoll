@@ -132,6 +132,13 @@ using DeleteEnvelopePointRangeFn = bool (*)(TrackEnvelope* envelope, double time
 // range before calling GetFXEnvelope.
 using TrackFX_GetNumParamsFn = int (*)(MediaTrack* track, int fx);
 
+// v0.17.0-alpha.1: live parameter set. Used by the spatializer to
+// push camera-derived `distance` and `spread` values into the JSFX
+// sliders every OnTimer tick (no envelope points, clean automation
+// lane). REAPER writes the value into the plugin's slider slot and
+// triggers @slider on the audio thread.
+using TrackFX_SetParamFn = bool (*)(MediaTrack* track, int fx, int param, double val);
+
 // ---- v0.12.0-alpha.7 envelope state-chunk APIs (visibility flag) -------
 //
 // GetFXEnvelope creates the envelope but leaves its VIS flag at 0 by
@@ -286,6 +293,9 @@ struct ReaperApi {
   Envelope_SortPointsFn envelope_SortPoints = nullptr;
   DeleteEnvelopePointRangeFn deleteEnvelopePointRange = nullptr;
   TrackFX_GetNumParamsFn trackFX_GetNumParams = nullptr;
+
+  // v0.17.0-alpha.1: live slider write for the spatializer JSFX.
+  TrackFX_SetParamFn trackFX_SetParam = nullptr;
 
   // v0.12.0-alpha.7: envelope visibility flag via state chunk.
   GetEnvelopeStateChunkFn getEnvelopeStateChunk = nullptr;

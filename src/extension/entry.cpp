@@ -149,6 +149,16 @@ constexpr char kCfgKeyDefaultAnimationsFolder[] = "default_animations_folder";
 constexpr char kCfgKeyUpdateEnabled[]            = "update.enabled";
 constexpr char kCfgKeyUpdateAutoInstallOnClose[] = "update.auto_install_on_close";
 
+// v0.17.0-alpha.1: audio spatializer persistence. All GLOBAL — one
+// config applies to every placed item. Per-animation override is on
+// the alpha.2 roadmap (would namespace under
+// `spatial.per_anim.<sanitised_name>.*`, mirroring CameraConfig).
+constexpr char kCfgKeySpatialEnabled[]     = "spatial.enabled";
+constexpr char kCfgKeySpatialMaxDistance[] = "spatial.max_distance";
+constexpr char kCfgKeySpatialCurveType[]   = "spatial.curve_type";
+constexpr char kCfgKeySpatialSpreadStart[] = "spatial.spread_start";
+constexpr char kCfgKeySpatialSpreadEnd[]   = "spatial.spread_end";
+
 // Default subfolder name for project-relative animations storage. Convention
 // matches game-industry layouts (Animations/ alongside Audio/, Materials/,
 // etc.). Created automatically when a saved project is opened.
@@ -291,6 +301,18 @@ void EnsureConfigDefaults() {
   // install via update.auto_install_on_close=0.
   if (!g_config.Has(kCfgKeyUpdateEnabled))            g_config.SetDouble(kCfgKeyUpdateEnabled, 1.0);
   if (!g_config.Has(kCfgKeyUpdateAutoInstallOnClose)) g_config.SetDouble(kCfgKeyUpdateAutoInstallOnClose, 1.0);
+  // v0.17.0-alpha.1: spatializer defaults. Master enable is OFF —
+  // users who don't route audio through HoloRoll see zero difference
+  // from previous releases. Other defaults follow the user spec:
+  //   max_distance = 20 m (mid-range preset)
+  //   curve_type   = 0 (Linear)
+  //   spread_start = 0.2  (slight stereo width at source)
+  //   spread_end   = 0.0  (collapse to mono point at max distance)
+  if (!g_config.Has(kCfgKeySpatialEnabled))     g_config.SetDouble(kCfgKeySpatialEnabled, 0.0);
+  if (!g_config.Has(kCfgKeySpatialMaxDistance)) g_config.SetDouble(kCfgKeySpatialMaxDistance, 20.0);
+  if (!g_config.Has(kCfgKeySpatialCurveType))   g_config.SetDouble(kCfgKeySpatialCurveType, 0.0);
+  if (!g_config.Has(kCfgKeySpatialSpreadStart)) g_config.SetDouble(kCfgKeySpatialSpreadStart, 0.2);
+  if (!g_config.Has(kCfgKeySpatialSpreadEnd))   g_config.SetDouble(kCfgKeySpatialSpreadEnd, 0.0);
 }
 
 // Read the configured region-name prefix and apply it to the AnimationLibrary
@@ -359,6 +381,28 @@ GlViewport::CameraConfig LoadCameraConfigForAnim(const std::string& animName) {
   // have the key but we ignore it.
   cfg.damping = static_cast<float>(g_config.GetDouble(p + "damping", 0.15));
   return cfg;
+}
+
+// v0.17.0-alpha.1: global spatializer config load/save. No per-anim
+// namespacing in this release (deferred to alpha.2); reads the flat
+// `spatial.*` keys straight into the SpatialConfig struct.
+GlViewport::SpatialConfig LoadSpatialConfigFromGlobal() {
+  GlViewport::SpatialConfig cfg;
+  cfg.enabled     = g_config.GetDouble(kCfgKeySpatialEnabled,     0.0) >= 0.5;
+  cfg.maxDistance = static_cast<float>(g_config.GetDouble(kCfgKeySpatialMaxDistance, 20.0));
+  cfg.curveType   = static_cast<int>  (g_config.GetDouble(kCfgKeySpatialCurveType,   0.0));
+  cfg.spreadStart = static_cast<float>(g_config.GetDouble(kCfgKeySpatialSpreadStart, 0.2));
+  cfg.spreadEnd   = static_cast<float>(g_config.GetDouble(kCfgKeySpatialSpreadEnd,   0.0));
+  return cfg;
+}
+
+void SaveSpatialConfigToGlobal(const GlViewport::SpatialConfig& cfg) {
+  g_config.SetDouble(kCfgKeySpatialEnabled,     cfg.enabled ? 1.0 : 0.0);
+  g_config.SetDouble(kCfgKeySpatialMaxDistance, cfg.maxDistance);
+  g_config.SetDouble(kCfgKeySpatialCurveType,   static_cast<double>(cfg.curveType));
+  g_config.SetDouble(kCfgKeySpatialSpreadStart, cfg.spreadStart);
+  g_config.SetDouble(kCfgKeySpatialSpreadEnd,   cfg.spreadEnd);
+  g_config.Save();
 }
 
 void SaveCameraConfigForAnim(const std::string& animName,
@@ -991,6 +1035,10 @@ void OpenViewportIfNeeded() {
     ApplyPlacementOptionsToViewport();
     // v0.12.0-alpha.13: hydrate debug-log toggle from config.
     ApplyDebugFlagFromConfig();
+    // v0.17.0-alpha.1: hydrate spatializer config. Master enable
+    // defaults to OFF for existing users — new install is fully
+    // dormant on this feature until they check the box.
+    g_viewport.SetSpatialConfig(LoadSpatialConfigFromGlobal());
 
     // v0.9.0 / alpha.14: register OLE drop target so files dragged from
     // Explorer onto the viewport land in the active animations folder.
@@ -1038,6 +1086,8 @@ void ReloadConfigFromDisk() {
     ApplyPlacementOptionsToViewport();
     // alpha.13: pick up debug flag if the user edited the .ini directly.
     ApplyDebugFlagFromConfig();
+    // v0.17.0-alpha.1: same for spatializer config.
+    g_viewport.SetSpatialConfig(LoadSpatialConfigFromGlobal());
   }
   // Hot-reload toggle may have flipped.
   if (HotReloadEnabled() && !g_currentAnimationsFolder.empty() && !g_watcher.IsRunning()) {
@@ -1741,6 +1791,30 @@ constexpr const char* kMotionFxNameCandidates[] = {
     "holoroll_motion",              // filename without extension — LAST RESORT
 };
 
+// v0.17.0-alpha.1: spatializer JSFX candidate names. Same resolution
+// ladder as kMotionFxNameCandidates — desc:-line first (survives
+// REAPER's FX-index quirks), filename fallbacks after.
+constexpr const char* kSpatialFxNameCandidates[] = {
+    "HoloRoll Spatializer",
+    "JS: HoloRoll Spatializer",
+    "HoloRoll/holoroll_spatial",
+    "holoroll_spatial.jsfx",
+    "holoroll_spatial",
+};
+
+// v0.17.0-alpha.1: spatializer JSFX slider layout — must stay in sync
+// with assets/effects/HoloRoll/holoroll_spatial.jsfx. slider indices
+// are 1-based in the .jsfx file but TrackFX_SetParam takes 0-based
+// param indices (slider1 == paramIdx 0).
+enum SpatialParam : int {
+  kSpatialParamDistance   = 0,   // slider1: envelope-driven (extension writes)
+  kSpatialParamSpread     = 1,   // slider2: envelope-driven (extension writes)
+  kSpatialParamMaxDist    = 2,   // slider3: user-facing (extension writes on config change)
+  kSpatialParamCurveType  = 3,   // slider4: user-facing (extension writes on config change)
+  kSpatialParamBypass     = 4,   // slider5: user-facing manual bypass
+  kSpatialParamPan        = 5,   // slider6: envelope-driven (extension writes)
+};
+
 // Read a track's display name. Returns empty string on failure or if the
 // track has no name set.
 std::string ReadTrackName(MediaTrack* track) {
@@ -1833,6 +1907,131 @@ int EnsureMotionFx(MediaTrack* track) {
     if (idx >= 0) return idx;
   }
   return -1;
+}
+
+// v0.17.0-alpha.1: same resolution ladder for the spatializer JSFX.
+// Called lazily from the OnTimer spatializer-update path whenever the
+// user has Spatialize enabled — placement code does not touch this.
+// Returns FX index on the track, or -1 if the JSFX isn't installed
+// (typically means the user needs to rescan plugins after upgrading
+// or the installer's Effects/HoloRoll/ payload didn't reach REAPER's
+// resource path).
+int EnsureSpatialFx(MediaTrack* track) {
+  if (!track) return -1;
+  const auto& api = g_bridge.Api();
+  if (!api.trackFX_AddByName) return -1;
+  for (const char* name : kSpatialFxNameCandidates) {
+    const int existing = api.trackFX_AddByName(track, name, false, 0);
+    if (existing >= 0) return existing;
+  }
+  for (const char* name : kSpatialFxNameCandidates) {
+    const int idx = api.trackFX_AddByName(track, name, false, -1);
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+// ---- v0.17.0-alpha.1 spatializer per-tick update ------------------------
+//
+// Called from OnTimer whenever the user has Spatialize enabled. Finds
+// (or lazily inserts) the spatializer JSFX on the HoloRoll parent
+// track and pushes CURRENT distance + spread values into its sliders
+// via TrackFX_SetParam. No envelope points — just live slider writes,
+// so REAPER's automation lane stays clean.
+//
+// Distance is Euclidean camera-to-origin in glTF units (typically
+// metres for real-scale exports). Model origin is (0,0,0) in glTF
+// space per the alpha.1 spec — the mesh is centred at world zero in
+// the 3D preview, so `length(camera_world)` is the correct distance.
+//
+// Spread interpolates start→end following the same curve preset as
+// gain — so at close distance we hit spreadStart, at max distance we
+// hit spreadEnd. Extension computes the interpolated value here (JSFX
+// side is fully live, doesn't know about start/end).
+//
+// Static params (max_distance, curve_type) get pushed too — cheap,
+// keeps JSFX in sync if the user toggles presets while running.
+//
+// Returns false if the JSFX couldn't be resolved (typically means the
+// installer's Effects/HoloRoll/ payload didn't reach REAPER, or the
+// user hasn't rescanned plugins). Caller logs once and moves on.
+bool UpdateSpatializerJsfx(MediaTrack* track,
+                            const GlViewport::SpatialConfig& cfg,
+                            float cameraX, float cameraY, float cameraZ,
+                            float cameraYawDeg, float cameraPitchDeg) {
+  if (!track) return false;
+  const auto& api = g_bridge.Api();
+  if (!api.trackFX_SetParam) return false;
+
+  const int fxIdx = EnsureSpatialFx(track);
+  if (fxIdx < 0) return false;
+
+  // Distance to model origin at (0,0,0) in glTF space.
+  const double dx = static_cast<double>(cameraX);
+  const double dy = static_cast<double>(cameraY);
+  const double dz = static_cast<double>(cameraZ);
+  double distance = std::sqrt(dx*dx + dy*dy + dz*dz);
+  if (distance < 0.0) distance = 0.0;
+
+  // Stereo pan derived from camera orientation. Horizontal projection
+  // only — vertical (Y) doesn't affect stereo pan in a 2-channel
+  // system. Convention derivation:
+  //   ApplyCameraTransform() does glRotatef(-pitch, X) * glRotatef(-yaw, Y),
+  //   so world-space right-vector = Ry(yaw) * (1,0,0) = (cos yaw, 0, -sin yaw)
+  //   and vector-from-camera-to-source (source at origin) has horizontal
+  //   components (-camX, -camZ).
+  //   pan = dot(dir_horizontal_normalised, right_horizontal)
+  //       = (-camX * cos yaw + camZ * sin yaw) / horiz_len
+  // Positive = source is to the right of view -> louder right channel.
+  // Falls back to pan=0 when camera is directly above/below source
+  // (horiz_len ~= 0 — no meaningful left/right).
+  double pan = 0.0;
+  const double horizLen = std::sqrt(dx*dx + dz*dz);
+  if (horizLen > 1e-4) {
+    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+    const double yawRad = static_cast<double>(cameraYawDeg) * kDegToRad;
+    pan = (-dx * std::cos(yawRad) + dz * std::sin(yawRad)) / horizLen;
+    if (pan < -1.0) pan = -1.0;
+    if (pan >  1.0) pan =  1.0;
+  }
+  // Suppress `unused variable` for cameraPitchDeg — reserved for
+  // future vertical-panning use (spatial cue for above/below).
+  (void)cameraPitchDeg;
+
+  // Normalise for spread interpolation.
+  const double maxD = cfg.maxDistance > 0.0f ? cfg.maxDistance : 1.0f;
+  double n = distance / maxD;
+  if (n < 0.0) n = 0.0;
+  if (n > 1.0) n = 1.0;
+
+  // Apply the same curve to spread interpolation that JSFX applies to
+  // gain — keeps close/far transition acoustically consistent between
+  // volume and stereo width.
+  double curvedN = n;
+  switch (cfg.curveType) {
+    case 1: curvedN = std::log10(1.0 + 9.0 * n); break;         // logarithmic
+    case 2: curvedN = 1.0 - (1.0 - n) * (1.0 - n); break;       // exponential (mirror of JSFX)
+    case 3: {                                                    // inverse-distance rescaled
+      const double raw = 1.0 / (1.0 + 10.0 * n);
+      const double c   = (raw - (1.0/11.0)) / (1.0 - (1.0/11.0));
+      curvedN = 1.0 - (c < 0.0 ? 0.0 : c);
+      break;
+    }
+    default: curvedN = n; break;                                 // linear
+  }
+  const double spread = static_cast<double>(cfg.spreadStart) +
+                        (static_cast<double>(cfg.spreadEnd) -
+                         static_cast<double>(cfg.spreadStart)) * curvedN;
+
+  api.trackFX_SetParam(track, fxIdx, kSpatialParamDistance,  distance);
+  api.trackFX_SetParam(track, fxIdx, kSpatialParamSpread,    spread);
+  api.trackFX_SetParam(track, fxIdx, kSpatialParamMaxDist,   cfg.maxDistance);
+  api.trackFX_SetParam(track, fxIdx, kSpatialParamCurveType, static_cast<double>(cfg.curveType));
+  api.trackFX_SetParam(track, fxIdx, kSpatialParamPan,       pan);
+  // Bypass slider is user-controlled from within REAPER's FX window
+  // and by the JSFX's own play_state check — extension doesn't
+  // force-write it on the live path.
+  return true;
 }
 
 // ---- v0.12.0-alpha.5/.6/.7 motion envelope writing ----------------------
@@ -2568,13 +2767,18 @@ void PlaceOurItemsAndRegions(MediaTrack* /*ignored*/, double /*ignored*/) {
     MediaItem* item = CreateNamedItemWithRolls(targetTrack, cursor, duration,
                                                0.0f, 0.0f, itemName);
     if (item) {
-      // v0.12.0-alpha.5/.6: write motion envelopes for this item.
-      // Surgical clear in [item.start, item.end] keeps envelopes for
-      // previously-placed items intact (track is persistent).
+      // v0.12.0-alpha.5/.6: motion envelope writing.
+      // v0.17.0-alpha.1: disabled — motion envelope curves were
+      // making the automation lane noisy without a stable use case
+      // for them yet. The pipeline (WriteMotionEnvelopesForItem +
+      // TopNActiveBones + JSFX slider layout) is intact; re-enable
+      // by uncommenting when the motion-driven use case returns.
+#if 0
       if (loc.fxIdx >= 0) {
         WriteMotionEnvelopesForItem(targetTrack, loc.fxIdx,
                                     anim, cursor, fps);
       }
+#endif
       ++placed;
       existingNames.push_back(itemName);
       cursor += duration + gap;
@@ -2639,9 +2843,13 @@ void PlacePendingAtCursor() {
     MediaItem* item = CreateNamedItemWithRolls(track, pos, duration,
                                                0.0f, 0.0f, basename);
     if (item) {
+      // v0.17.0-alpha.1: motion envelope writing disabled (see
+      // PlaceOurItemsAndRegions for rationale).
+#if 0
       if (loc.fxIdx >= 0) {
         WriteMotionEnvelopesForItem(track, loc.fxIdx, anim, pos, fps);
       }
+#endif
       ++placed;
       existingNames.push_back(basename);
       pos += duration + gap;
@@ -2675,9 +2883,13 @@ void PlaceSingleAtCursor(const std::string& basename) {
 
   MediaItem* item = CreateNamedItemWithRolls(track, pos, duration,
                                              0.0f, 0.0f, basename);
+  // v0.17.0-alpha.1: motion envelope writing disabled here too.
+#if 0
   if (item && loc.fxIdx >= 0) {
     WriteMotionEnvelopesForItem(track, loc.fxIdx, anim, pos, GetFps());
   }
+#endif
+  (void)item;  // still referenced by if (item && ...) when re-enabled.
   if (api.updateArrange) api.updateArrange();
 }
 
@@ -3209,6 +3421,32 @@ void OnTimer() {
     }
   }
 
+  // v0.17.0-alpha.1: push camera-derived distance + spread into the
+  // spatializer JSFX every tick. Only fires when the master enable is
+  // on — dormant otherwise (no JSFX insertion, no SetParam calls).
+  //
+  // We look up the HoloRoll parent track lazily each tick. If the
+  // track hasn't been created yet (fresh project, no items placed),
+  // FindTrackByName returns nullptr and this is a no-op — spatializer
+  // needs items on the timeline anyway to be routing-through-useful.
+  //
+  // JSFX resolution is cached inside REAPER's FX list, so
+  // EnsureSpatialFx (called from UpdateSpatializerJsfx) is a hash
+  // lookup in steady state, not a plugin-rescan.
+  {
+    const GlViewport::SpatialConfig& sc = g_viewport.GetSpatialConfig();
+    if (sc.enabled) {
+      MediaTrack* holoTrack = FindTrackByName(kItemsTrackName);
+      if (holoTrack) {
+        float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+        g_viewport.GetCameraWorldPos(&cx, &cy, &cz);
+        float yawDeg = 0.0f, pitchDeg = 0.0f;
+        g_viewport.GetCameraOrientation(&yawDeg, &pitchDeg);
+        UpdateSpatializerJsfx(holoTrack, sc, cx, cy, cz, yawDeg, pitchDeg);
+      }
+    }
+  }
+
   g_viewport.Render(*vertices, *indices, timelineTime, frame, totalFrames, status);
 
   if (g_activeAnimIdx != kNoActiveAnim) {
@@ -3251,6 +3489,12 @@ void OnTimer() {
       g_config.SetDouble(kCfgKeyOpenOnStartup,
                          g_viewport.GetOpenOnStartup() ? 1.0 : 0.0);
       g_config.Save();
+    }
+    // v0.17.0-alpha.1: spatializer config persistence. User's UI
+    // edits (checkbox / preset / curve / spread sliders) all mark
+    // spatialDirty_; we round-trip to disk on the same debounce.
+    if (g_viewport.ConsumeSpatialDirty()) {
+      SaveSpatialConfigToGlobal(g_viewport.GetSpatialConfig());
     }
     lastSceneSaveTick = nowTicks;
   }
@@ -3630,12 +3874,16 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
           });
         }
 
+        // v0.17.0-alpha.1: motion envelope writing disabled — see
+        // PlaceOurItemsAndRegions for rationale. Pipeline intact.
+#if 0
         if (loc.fxIdx >= 0) {
           // Envelope sampled in reverse direction so the visualisation
           // tracks the audio's backwards playback.
           WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps,
                                       /*reversed=*/true, playrate);
         }
+#endif
 
         const double regionStart = pos;
         const double regionEnd   = pos + il + regionPad;
@@ -3661,10 +3909,13 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
       }
       SetItemPlayrate(discoveredItem, playrate);
 
+      // v0.17.0-alpha.1: motion envelope writing disabled.
+#if 0
       if (loc.fxIdx >= 0) {
         WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps,
                                     /*reversed=*/false, playrate);
       }
+#endif
 
       // Variation 1: wrap the repositioned original item.
       {
@@ -3709,10 +3960,13 @@ nlohmann::json holoroll_build_regions(const nlohmann::json& args) {
         // v0.15.0-alpha.1: apply playrate to the duplicate's take.
         SetItemPlayrate(dup, playrate);
 
+        // v0.17.0-alpha.1: motion envelope writing disabled.
+#if 0
         if (loc.fxIdx >= 0) {
           WriteMotionEnvelopesForItem(loc.track, loc.fxIdx, animObj, pos, fps,
                                       /*reversed=*/false, playrate);
         }
+#endif
 
         const double regionStart = pos;
         const double regionEnd   = pos + il + regionPad;
